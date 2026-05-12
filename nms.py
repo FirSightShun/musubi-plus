@@ -2,88 +2,70 @@
 # encoding: utf-8
 import numpy as np
 
-class NMS:
 
-    def __init__(self, boxes, scores, thresholdScore=0.5, thresholdIoU=0.5, labels=None):
-        """
-        parameter boxes:list [[y0, x0, y1, x1],...] or [[x0, y0, x1, y1],...]
-        parameter scores:list [score1,score2,...]
-        parameter labels:list [label1,label2,...]
-        """
-        self.boxes = np.array(boxes)
-        self.scores = np.array(scores)
-        self.thresholdScore = thresholdScore
-        self.thresholdIoU = thresholdIoU
-        self.labels = np.array(labels)
-        self.filter_boxes()
-        
-    def filter_boxes(self):
-        # filter boxes score lower then thresholdScore
-        index = np.where(self.scores>self.thresholdScore)
-        self.scores = self.scores[index]
-        self.boxes = self.boxes[index]
+def nms(boxes, scores, labels=None, score_threshold=0.5, iou_threshold=0.5):
+    """
+    Non-Maximum Suppression.
 
-    def compute_iou(self, rec1, rec2):
-        """
-        computing IoU
-        param rec1: (y0, x0, y1, x1), which reflects
-                (top, left, bottom, right)
-        param rec2: (y0, x0, y1, x1)
-        return: scala value of IoU
-        addition: Infact it's no influence to the result if useing (x0, y0, x1, y1)
-                  Beacuse this equate to that you exchange X_axis and Y_axis
-        """
-        # computing area of each rectangles
-        S_rec1 = (rec1[2] - rec1[0]) * (rec1[3] - rec1[1])
-        S_rec2 = (rec2[2] - rec2[0]) * (rec2[3] - rec2[1]) 
-        # computing the sum_area
-        sum_area = S_rec1 + S_rec2 
-        # find each edge of the intersect rectangle
-        left_line = max(rec1[1], rec2[1])
-        right_line = min(rec1[3], rec2[3])
-        top_line = max(rec1[0], rec2[0])
-        bottom_line = min(rec1[2], rec2[2])
-        # judge if there is an intersect
-        if left_line >= right_line or top_line >= bottom_line:
-            return 0
-        else:
-            intersect = (right_line - left_line) * (bottom_line - top_line)
-            return (intersect / (sum_area - intersect))*1.0
+    Args:
+        boxes: array-like (N, 4), format [y0, x0, y1, x1] or [x0, y0, x1, y1]
+        scores: array-like (N,)
+        labels: array-like (N,), optional
+        score_threshold: discard boxes with score <= this value
+        iou_threshold: suppress boxes with IoU > this value
 
-    def run(self):
-        # delete the repreat box use NMS algorithm
-        boxes_nms = []
-        scores_nms = []
-        labels_nms = []
-        while len(self.scores):
-            # get max score index
-            index = np.argmax(self.scores)
-            box_ = self.boxes[index]
-            scores_nms.append(self.scores[index])
-            labels_nms.append(self.labels[index])
-            boxes_nms.append(box_)
-            self.scores = np.delete(self.scores, index)         # delete score from source scores
-            self.labels = np.delete(self.labels, index)
-            self.boxes = np.delete(self.boxes, index, axis=0)   # delete box from source boxes
-            index_del = [] # record the box to be deleted
-            for i,box in enumerate(self.boxes):
-                IoU  = self.compute_iou(box, box_)
-                if IoU > self.thresholdIoU:
-                    index_del.append(i) 
-            self.scores = np.delete(self.scores, index_del)
-            self.labels = np.delete(self.labels, index_del)
-            self.boxes = np.delete(self.boxes, index_del, axis=0)
-        return boxes_nms,scores_nms,labels_nms
+    Returns:
+        boxes_out, scores_out, labels_out as numpy arrays (labels_out is None if labels not given)
+    """
+    boxes = np.array(boxes, dtype=float)
+    scores = np.array(scores, dtype=float)
+    has_labels = labels is not None
+    labels = np.array(labels) if has_labels else np.empty(len(scores), dtype=int)
 
-if __name__=='__main__':
-    boxes = np.array([[0,0,10,10],[1,1,10,10],[3,3,5,5]])
-    scores = np.array([0.6,0.7,0.6])
-    labels = np.array([0,1,2])
-    nms = NMS(boxes, scores, thresholdScore=0.5, thresholdIoU=0.5, labels=labels)
-    box_nms,score_nms,labels = nms.run()
-    print(box_nms)
-    print(score_nms)
-    print(labels)
+    # Filter by score threshold
+    keep = scores > score_threshold
+    boxes, scores, labels = boxes[keep], scores[keep], labels[keep]
+
+    if len(scores) == 0:
+        empty = np.array([])
+        return boxes, empty, labels if has_labels else None
+
+    # Sort by score descending
+    order = np.argsort(scores)[::-1]
+    boxes, scores, labels = boxes[order], scores[order], labels[order]
+
+    suppressed = np.zeros(len(scores), dtype=bool)
+    selected = []
+
+    for i in range(len(scores)):
+        if suppressed[i]:
+            continue
+        selected.append(i)
+        if i + 1 < len(scores):
+            iou = _iou_vectorized(boxes[i], boxes[i + 1:])
+            suppressed[i + 1:][iou > iou_threshold] = True
+
+    idx = np.array(selected)
+    return boxes[idx], scores[idx], labels[idx] if has_labels else None
 
 
-        
+def _iou_vectorized(box, boxes):
+    """IoU of one box against an array of boxes."""
+    inter_area = (
+        np.maximum(0, np.minimum(box[2], boxes[:, 2]) - np.maximum(box[0], boxes[:, 0])) *
+        np.maximum(0, np.minimum(box[3], boxes[:, 3]) - np.maximum(box[1], boxes[:, 1]))
+    )
+    area_box = (box[2] - box[0]) * (box[3] - box[1])
+    area_boxes = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
+    union_area = area_box + area_boxes - inter_area
+    return np.where(union_area > 0, inter_area / union_area, 0.0)
+
+
+if __name__ == '__main__':
+    boxes = np.array([[0, 0, 10, 10], [1, 1, 10, 10], [3, 3, 5, 5]])
+    scores = np.array([0.6, 0.7, 0.6])
+    labels = np.array([0, 1, 2])
+    boxes_out, scores_out, labels_out = nms(boxes, scores, labels, score_threshold=0.5, iou_threshold=0.5)
+    print(boxes_out)
+    print(scores_out)
+    print(labels_out)
