@@ -1,0 +1,868 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GRPO多Reward防Reward Hacking方法体系 — 研究报告</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --bg-secondary: #f7f8fa;
+    --bg-tertiary: #f0f1f5;
+    --text-primary: #1a1a2e;
+    --text-secondary: #4a4a68;
+    --text-tertiary: #7a7a98;
+    --border: #e2e4ea;
+    --accent-blue: #2563eb;
+    --accent-blue-light: #eff6ff;
+    --accent-green: #16a34a;
+    --accent-green-light: #f0fdf4;
+    --accent-purple: #7c3aed;
+    --accent-purple-light: #f5f3ff;
+    --accent-amber: #d97706;
+    --accent-amber-light: #fffbeb;
+    --accent-red: #dc2626;
+    --accent-red-light: #fef2f2;
+    --accent-teal: #0d9488;
+    --accent-teal-light: #f0fdfa;
+    --radius: 10px;
+    --radius-lg: 14px;
+    --shadow: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
+    --shadow-md: 0 4px 12px rgba(0,0,0,0.07);
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", sans-serif;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    line-height: 1.75;
+    font-size: 15px;
+  }
+
+  .container {
+    max-width: 920px;
+    margin: 0 auto;
+    padding: 40px 24px 80px;
+  }
+
+  /* Header */
+  .header {
+    text-align: center;
+    padding: 48px 32px 40px;
+    background: linear-gradient(135deg, #1e1b4b 0%, #312e81 50%, #4338ca 100%);
+    border-radius: var(--radius-lg);
+    margin-bottom: 32px;
+    color: #fff;
+    position: relative;
+    overflow: hidden;
+  }
+  .header::before {
+    content: "";
+    position: absolute;
+    top: -50%;
+    right: -20%;
+    width: 400px;
+    height: 400px;
+    background: radial-gradient(circle, rgba(129,140,248,0.15) 0%, transparent 70%);
+    border-radius: 50%;
+  }
+  .header h1 {
+    font-size: 28px;
+    font-weight: 700;
+    letter-spacing: -0.5px;
+    margin-bottom: 12px;
+    position: relative;
+  }
+  .header .subtitle {
+    font-size: 15px;
+    color: rgba(255,255,255,0.7);
+    position: relative;
+  }
+  .header .meta {
+    margin-top: 20px;
+    font-size: 13px;
+    color: rgba(255,255,255,0.5);
+    position: relative;
+  }
+
+  /* Section */
+  .section {
+    background: var(--bg);
+    border-radius: var(--radius-lg);
+    padding: 32px;
+    margin-bottom: 24px;
+    box-shadow: var(--shadow);
+  }
+  .section-title {
+    font-size: 20px;
+    font-weight: 700;
+    margin-bottom: 20px;
+    padding-bottom: 12px;
+    border-bottom: 2px solid var(--bg-tertiary);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .section-title .icon {
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    color: #fff;
+    flex-shrink: 0;
+  }
+  .subsection-title {
+    font-size: 17px;
+    font-weight: 600;
+    margin: 24px 0 12px;
+    color: var(--text-primary);
+  }
+
+  /* Tags */
+  .tag {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: 500;
+    margin-right: 6px;
+  }
+  .tag-blue { background: var(--accent-blue-light); color: var(--accent-blue); }
+  .tag-green { background: var(--accent-green-light); color: var(--accent-green); }
+  .tag-purple { background: var(--accent-purple-light); color: var(--accent-purple); }
+  .tag-amber { background: var(--accent-amber-light); color: var(--accent-amber); }
+  .tag-red { background: var(--accent-red-light); color: var(--accent-red); }
+  .tag-teal { background: var(--accent-teal-light); color: var(--accent-teal); }
+
+  /* Method Card */
+  .method-card {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 24px;
+    margin-bottom: 20px;
+    position: relative;
+    transition: box-shadow 0.2s;
+  }
+  .method-card:hover {
+    box-shadow: var(--shadow-md);
+  }
+  .method-card.blue { border-left: 4px solid var(--accent-blue); }
+  .method-card.green { border-left: 4px solid var(--accent-green); }
+  .method-card.purple { border-left: 4px solid var(--accent-purple); }
+
+  .method-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 12px;
+  }
+  .method-name {
+    font-size: 18px;
+    font-weight: 700;
+  }
+  .method-fullname {
+    font-size: 13px;
+    color: var(--text-tertiary);
+  }
+
+  /* Formula block */
+  .formula {
+    background: var(--bg-tertiary);
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin: 12px 0;
+    font-family: "Cambria Math", "Latin Modern Math", Georgia, serif;
+    font-size: 15px;
+    text-align: center;
+    color: var(--text-primary);
+    overflow-x: auto;
+    line-height: 2;
+  }
+  .formula-label {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    margin-bottom: 6px;
+    font-family: -apple-system, sans-serif;
+  }
+
+  /* Comparison table */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0;
+    font-size: 14px;
+  }
+  th {
+    background: var(--bg-tertiary);
+    font-weight: 600;
+    text-align: left;
+    padding: 10px 14px;
+    border-bottom: 2px solid var(--border);
+    font-size: 13px;
+    color: var(--text-secondary);
+  }
+  td {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  tr:last-child td { border-bottom: none; }
+
+  /* Key point / highlight box */
+  .highlight-box {
+    border-radius: var(--radius);
+    padding: 16px 20px;
+    margin: 16px 0;
+    font-size: 14px;
+  }
+  .highlight-box.blue { background: var(--accent-blue-light); border: 1px solid #bfdbfe; }
+  .highlight-box.green { background: var(--accent-green-light); border: 1px solid #bbf7d0; }
+  .highlight-box.purple { background: var(--accent-purple-light); border: 1px solid #ddd6fe; }
+  .highlight-box.amber { background: var(--accent-amber-light); border: 1px solid #fde68a; }
+  .highlight-box.red { background: var(--accent-red-light); border: 1px solid #fecaca; }
+  .highlight-box.teal { background: var(--accent-teal-light); border: 1px solid #99f6e4; }
+  .highlight-box strong {
+    display: block;
+    margin-bottom: 4px;
+  }
+
+  /* Flow diagram (CSS-based) */
+  .flow-row {
+    display: flex;
+    align-items: stretch;
+    gap: 0;
+    margin: 20px 0;
+    justify-content: center;
+    flex-wrap: wrap;
+  }
+  .flow-node {
+    padding: 14px 18px;
+    border-radius: var(--radius);
+    text-align: center;
+    font-size: 13px;
+    font-weight: 500;
+    min-width: 120px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+  }
+  .flow-arrow {
+    display: flex;
+    align-items: center;
+    padding: 0 8px;
+    color: var(--text-tertiary);
+    font-size: 20px;
+  }
+
+  /* Effectiveness ladder */
+  .ladder {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin: 20px 0;
+  }
+  .ladder-step {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .ladder-bar {
+    height: 32px;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    padding-left: 14px;
+    font-size: 13px;
+    font-weight: 500;
+    color: #fff;
+    transition: width 0.6s ease;
+  }
+  .ladder-label {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    min-width: 80px;
+    text-align: right;
+  }
+
+  /* Code block */
+  .code-block {
+    background: #1e1e2e;
+    color: #cdd6f4;
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin: 12px 0;
+    font-family: "Fira Code", "JetBrains Mono", "SF Mono", monospace;
+    font-size: 13px;
+    line-height: 1.6;
+    overflow-x: auto;
+  }
+  .code-block .keyword { color: #cba6f7; }
+  .code-block .func { color: #89b4fa; }
+  .code-block .string { color: #a6e3a1; }
+  .code-block .comment { color: #6c7086; }
+  .code-block .number { color: #fab387; }
+
+  /* List */
+  ul, ol {
+    padding-left: 24px;
+    margin: 8px 0;
+  }
+  li {
+    margin: 4px 0;
+  }
+  p {
+    margin: 8px 0;
+  }
+
+  /* Responsive */
+  @media (max-width: 640px) {
+    .container { padding: 20px 12px 60px; }
+    .section { padding: 20px 16px; }
+    .header { padding: 32px 20px 28px; }
+    .header h1 { font-size: 22px; }
+    table { font-size: 13px; }
+    th, td { padding: 8px 10px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="container">
+
+<!-- Header -->
+<div class="header">
+  <h1>GRPO 多 Reward 防 Reward Hacking 方法体系</h1>
+  <div class="subtitle">图像生成领域 &middot; 多目标强化学习 &middot; 奖励欺骗缓解策略</div>
+  <div class="meta">研究报告 &nbsp;|&nbsp; 2026-05-28 &nbsp;|&nbsp; 基于 MO-GRPO / PREF-GRPO / Adv-GRPO 等前沿工作</div>
+</div>
+
+<!-- 1. Problem Definition -->
+<div class="section">
+  <div class="section-title">
+    <span class="icon" style="background:var(--accent-red)">1</span>
+    问题定义：GRPO 多 Reward 下的 Reward Hacking
+  </div>
+
+  <p><strong>Reward Hacking</strong> 是指智能体过度拟合到错误指定的奖励模型，优化代理奖励但偏离真实目标的现象。在 GRPO 的多 Reward 设置中，该问题表现为两种典型模式：</p>
+
+  <div class="highlight-box red">
+    <strong>模式 A — 高方差奖励主导（MO-GRPO 揭示）</strong>
+    GRPO 先聚合所有 Reward 再归一化，导致方差最大的 Reward 主导优势函数。低方差但同样重要的 Reward 被系统性忽略，策略只优化单一目标而牺牲其他目标。
+  </div>
+
+  <div class="highlight-box red">
+    <strong>模式 B — 虚假优势（PREF-GRPO 揭示）</strong>
+    点式 Reward 模型对同组相似图像打分过于接近，标准差极小。归一化后，微小分数差异被过度放大，产生巨大但虚假的优势值，导致策略过度更新和奖励欺骗。
+  </div>
+
+  <div class="subsection-title">Reward Hacking 的典型表现</div>
+  <table>
+    <tr>
+      <th>场景</th>
+      <th>Hacking 行为</th>
+      <th>后果</th>
+    </tr>
+    <tr>
+      <td>机器翻译（En→Ja）</td>
+      <td>避免使用日语词汇来提升可读性分数</td>
+      <td>68.7% 输出为非日语文本（GRPO），MO-GRPO 仅 5.6%</td>
+    </tr>
+    <tr>
+      <td>文生图（HPS 优化）</td>
+      <td>过度饱和（颜色异常鲜艳）</td>
+      <td>奖励分数增长，图像质量实际下降</td>
+    </tr>
+    <tr>
+      <td>文生图（UR 优化）</td>
+      <td>图像偏暗（亮度异常偏低）</td>
+      <td>分数增长但视觉退化</td>
+    </tr>
+    <tr>
+      <td>指令跟随（RM+Length）</td>
+      <td>优先优化 RM 分数，完全牺牲长度目标</td>
+      <td>两个对抗性目标无法均衡</td>
+    </tr>
+  </table>
+</div>
+
+<!-- 2. MO-GRPO -->
+<div class="section">
+  <div class="section-title">
+    <span class="icon" style="background:var(--accent-blue)">2</span>
+    方法一：MO-GRPO
+    <span class="tag tag-blue">权重归一化层</span>
+  </div>
+
+  <div class="method-card blue">
+    <div class="method-header">
+      <span class="method-name">MO-GRPO</span>
+      <span class="method-fullname">Mitigating Reward Hacking of Group Relative Policy Optimization</span>
+    </div>
+    <span class="tag tag-blue">arXiv 2509.22047</span>
+    <span class="tag tag-blue">2025.09</span>
+
+    <div class="subsection-title">核心洞察</div>
+    <p>原始 GRPO 的优势函数计算顺序为<strong>「先聚合后归一化」</strong>，这使得高方差 Reward 分量与优势函数的相关性更强（Theorem 1）。MO-GRPO 将顺序改为<strong>「先归一化后聚合」</strong>，从根本上平衡各 Reward 的贡献。</p>
+
+    <div class="subsection-title">优势函数对比</div>
+    <div class="formula">
+      <div class="formula-label">GRPO（原始）：先聚合后归一化</div>
+      A<sub>g</sub> = &frac12; &sum;<sub>i=1</sub><sup>K</sup> R<sub>i</sub>(q, o<sub>g</sub>) &minus; mean<sub><b>o</b></sub>(&sum;<sub>i=1</sub><sup>K</sup> R<sub>i</sub>(q, <b>o</b>)) &frasl; std<sub><b>o</b></sub>(&sum;<sub>i=1</sub><sup>K</sup> R<sub>i</sub>(q, <b>o</b>))
+    </div>
+    <div class="formula">
+      <div class="formula-label">MO-GRPO（提出）：先归一化后聚合</div>
+      A<sub>g</sub><sup>MO</sup> = &sum;<sub>i=1</sub><sup>K</sup> &frac12; R<sub>i</sub>(q, o<sub>g</sub>) &minus; mean<sub><b>o</b></sub>(R<sub>i</sub>(q, <b>o</b>)) &frasl; std<sub><b>o</b></sub>(R<sub>i</sub>(q, <b>o</b>))
+    </div>
+
+    <div class="subsection-title">核心性质</div>
+    <table>
+      <tr>
+        <th>性质</th>
+        <th>GRPO</th>
+        <th>MO-GRPO</th>
+      </tr>
+      <tr>
+        <td>高方差奖励主导</td>
+        <td style="color:var(--accent-red)">存在</td>
+        <td style="color:var(--accent-green);font-weight:600">消除</td>
+      </tr>
+      <tr>
+        <td>正仿射变换不变性</td>
+        <td style="color:var(--accent-red)">不满足</td>
+        <td style="color:var(--accent-green);font-weight:600">满足</td>
+      </tr>
+      <tr>
+        <td>需要手动调权重</td>
+        <td>是</td>
+        <td style="color:var(--accent-green);font-weight:600">否（自动重加权）</td>
+      </tr>
+      <tr>
+        <td>Reward 不相关时各Reward相关性</td>
+        <td>&sigma;<sub>i</sub>/&sigma;（不均衡）</td>
+        <td style="color:var(--accent-green);font-weight:600">1/&radic;K（完美均衡）</td>
+      </tr>
+    </table>
+
+    <div class="subsection-title">实现代码</div>
+    <div class="code-block">
+<span class="keyword">def</span> <span class="func">MO_GRPO</span>(reward_1, reward_2):
+    combined_scores = []
+    std_r1 = np.std(reward_1) + <span class="number">1e-6</span>
+    std_r2 = np.std(reward_2) + <span class="number">1e-6</span>
+    r1_norm = (reward_1 - np.mean(reward_1)) / std_r1
+    r2_norm = (reward_2 - np.mean(reward_2)) / std_r2
+    <span class="keyword">for</span> i <span class="keyword">in</span> range(len(group_samples)):
+        score = (r1_norm[i] + r2_norm[i]) / np.sqrt(<span class="number">2</span>)
+        combined_scores.append(score)
+    <span class="keyword">return</span> combined_scores
+    </div>
+
+    <div class="subsection-title">实验结果</div>
+    <table>
+      <tr>
+        <th>任务</th>
+        <th>指标</th>
+        <th>GRPO</th>
+        <th>Dr. GRPO</th>
+        <th style="color:var(--accent-blue)">MO-GRPO</th>
+      </tr>
+      <tr>
+        <td>En→Ja 翻译</td>
+        <td>GPT-Eval</td>
+        <td>35.6%</td>
+        <td>42.6%</td>
+        <td style="color:var(--accent-blue);font-weight:600">68.8%</td>
+      </tr>
+      <tr>
+        <td>En→Zh 翻译</td>
+        <td>GPT-Eval</td>
+        <td>33.2%</td>
+        <td>28.3%</td>
+        <td style="color:var(--accent-blue);font-weight:600">71.7%</td>
+      </tr>
+      <tr>
+        <td>En→Zh 翻译</td>
+        <td>非中文输出比例&darr;</td>
+        <td>68.7%</td>
+        <td>70.7%</td>
+        <td style="color:var(--accent-blue);font-weight:600">5.6%</td>
+      </tr>
+      <tr>
+        <td>MO-Reacher-v5</td>
+        <td>总奖励&uarr;</td>
+        <td>1.29</td>
+        <td>1.10</td>
+        <td style="color:var(--accent-blue);font-weight:600">1.48</td>
+      </tr>
+    </table>
+  </div>
+
+  <div class="highlight-box blue">
+    <strong>核心结论</strong>
+    MO-GRPO 仅需改变优势函数的计算顺序（先归一化后聚合），即可自动平衡多 Reward 贡献，无需手动调参，是改动最小、即插即用的防 Hacking 方案。
+  </div>
+</div>
+
+<!-- 3. PREF-GRPO -->
+<div class="section">
+  <div class="section-title">
+    <span class="icon" style="background:var(--accent-green)">3</span>
+    方法二：PREF-GRPO
+    <span class="tag tag-green">奖励范式变革层</span>
+  </div>
+
+  <div class="method-card green">
+    <div class="method-header">
+      <span class="method-name">PREF-GRPO</span>
+      <span class="method-fullname">Pairwise Preference Reward for GRPO</span>
+    </div>
+    <span class="tag tag-green">复旦 & 腾讯</span>
+    <span class="tag tag-green">2025.09</span>
+
+    <div class="subsection-title">核心洞察</div>
+    <p>点式 Reward 模型对同组相似图像打分过于接近（标准差极小），归一化后微小差异被过度放大，产生<strong>虚假优势</strong>。PREF-GRPO 从奖励建模范式层面变革：用<strong>成对偏好胜率</strong>替代绝对分数。</p>
+
+    <div class="subsection-title">方法流程</div>
+    <div class="flow-row">
+      <div class="flow-node" style="background:var(--accent-green-light);color:var(--accent-green);border:1px solid #bbf7d0">
+        Step 1<br>策略生成一组图像
+      </div>
+      <div class="flow-arrow">&rarr;</div>
+      <div class="flow-node" style="background:var(--accent-green-light);color:var(--accent-green);border:1px solid #bbf7d0">
+        Step 2<br>PPRM 成对比较<br>计算胜率
+      </div>
+      <div class="flow-arrow">&rarr;</div>
+      <div class="flow-node" style="background:var(--accent-green-light);color:var(--accent-green);border:1px solid #bbf7d0">
+        Step 3<br>胜率替代绝对分数<br>计算优势并优化
+      </div>
+    </div>
+
+    <div class="formula">
+      <div class="formula-label">成对偏好胜率</div>
+      R<sub>i</sub><sup>pref</sup> = &frac;1&frasl;(G&minus;1) &sum;<sub>j&ne;i</sub> &Iota;[PPRM(x<sub>i</sub>) &succ; PPRM(x<sub>j</sub>)]
+    </div>
+
+    <div class="subsection-title">成对偏好 vs 绝对分数</div>
+    <table>
+      <tr>
+        <th>维度</th>
+        <th>绝对分数奖励</th>
+        <th>成对偏好奖励</th>
+      </tr>
+      <tr>
+        <td>奖励形式</td>
+        <td>每张图像一个绝对分数</td>
+        <td>图像间两两比较，计算胜率</td>
+      </tr>
+      <tr>
+        <td>方差特性</td>
+        <td>相似图像分数接近，方差极小</td>
+        <td style="color:var(--accent-green);font-weight:600">高质量→1，低质量→0，方差自然增大</td>
+      </tr>
+      <tr>
+        <td>优势估计</td>
+        <td>微小差异被过度放大→虚假优势</td>
+        <td style="color:var(--accent-green);font-weight:600">区分度更高，优势估计更稳健</td>
+      </tr>
+      <tr>
+        <td>对噪声鲁棒性</td>
+        <td>高度敏感</td>
+        <td style="color:var(--accent-green);font-weight:600">依赖相对排序，大幅减轻偏差放大</td>
+      </tr>
+      <tr>
+        <td>与人类偏好对齐</td>
+        <td>绝对评分，忽略细粒度差异</td>
+        <td style="color:var(--accent-green);font-weight:600">模拟人类相对比较过程</td>
+      </tr>
+    </table>
+
+    <div class="subsection-title">实验：Reward Hacking 可视化</div>
+    <table>
+      <tr>
+        <th>方法</th>
+        <th>训练中奖励分数</th>
+        <th>训练中图像质量</th>
+        <th>结论</th>
+      </tr>
+      <tr>
+        <td>UR 得分最大化</td>
+        <td>增长迅速</td>
+        <td style="color:var(--accent-red)">实际下降</td>
+        <td>典型 Reward Hacking</td>
+      </tr>
+      <tr>
+        <td>HPS+CLIP 组合</td>
+        <td>增长</td>
+        <td style="color:var(--accent-amber)">部分缓解但未完全解决</td>
+        <td>浅层组合有局限</td>
+      </tr>
+      <tr>
+        <td style="color:var(--accent-green);font-weight:600">PREF-GRPO</td>
+        <td>增长相对缓慢</td>
+        <td style="color:var(--accent-green);font-weight:600">持续稳定提升</td>
+        <td style="color:var(--accent-green)">有效缓解 Reward Hacking</td>
+      </tr>
+    </table>
+  </div>
+
+  <div class="highlight-box green">
+    <strong>核心结论</strong>
+    PREF-GRPO 从奖励建模范式层面解决问题：将"最大化绝对分数"转变为"拟合成对偏好"，从根本上增大奖励方差，消除虚假优势的土壤。简单多 Reward 加权组合（HPS+CLIP）仍基于点式分数，无法解决根因。
+  </div>
+</div>
+
+<!-- 4. Adv-GRPO -->
+<div class="section">
+  <div class="section-title">
+    <span class="icon" style="background:var(--accent-purple)">4</span>
+    方法三：Adv-GRPO
+    <span class="tag tag-purple">对抗博弈层</span>
+  </div>
+
+  <div class="method-card purple">
+    <div class="method-header">
+      <span class="method-name">Adv-GRPO</span>
+      <span class="method-fullname">Adversarial GRPO with Visual Foundation Models</span>
+    </div>
+    <span class="tag tag-purple">CVPR 2026</span>
+    <span class="tag tag-purple">NUS Show Lab & ByteDance</span>
+
+    <div class="subsection-title">核心洞察</div>
+    <p>预训练 Reward 模型存在固有偏差（PickScore 降低图像质量，OCR Reward 降低美学），且容易被 hack。Adv-GRPO 将图像生成建模为<strong>对抗博弈</strong>，用学习型奖励和视觉基础模型提供密集信号。</p>
+
+    <div class="subsection-title">对抗性奖励机制</div>
+    <div class="flow-row">
+      <div class="flow-node" style="background:var(--accent-purple-light);color:var(--accent-purple);border:1px solid #ddd6fe">
+        参考图像<br>= 正样本
+      </div>
+      <div class="flow-arrow">&darr;</div>
+      <div class="flow-node" style="background:var(--accent-purple-light);color:var(--accent-purple);border:1px solid #ddd6fe">
+        判别器训练<br>区分生成 vs 参考
+      </div>
+      <div class="flow-arrow">&darr;</div>
+      <div class="flow-node" style="background:var(--accent-purple-light);color:var(--accent-purple);border:1px solid #ddd6fe">
+        判别器作为 RM<br>提供反馈信号
+      </div>
+      <div class="flow-arrow">&darr;</div>
+      <div class="flow-node" style="background:var(--accent-purple-light);color:var(--accent-purple);border:1px solid #ddd6fe">
+        生成器<br>GRPO Loss 优化
+      </div>
+    </div>
+
+    <div class="subsection-title">视觉基础模型作为奖励（DINO）</div>
+    <ul>
+      <li><strong>密集视觉信号</strong>：DINO 提供跨多维度的一致性特征，而非单一标量分数</li>
+      <li><strong>DINO 相似度奖励</strong>：衡量生成图像与参考图像的视觉一致性</li>
+      <li><strong>对抗性 DINO 奖励</strong>：改善视觉保真度、结构清晰度、纹理丰富度、语义连贯性</li>
+      <li>额外支持<strong>RL 分布迁移 / 风格定制</strong>（如迁移到动漫风格域）</li>
+    </ul>
+
+    <div class="subsection-title">实验结果</div>
+    <table>
+      <tr>
+        <th>对比</th>
+        <th>图像质量胜率</th>
+        <th>美学胜率</th>
+      </tr>
+      <tr>
+        <td>Adv-GRPO vs Flow-GRPO</td>
+        <td style="color:var(--accent-purple);font-weight:600">70.0%</td>
+        <td style="color:var(--accent-purple);font-weight:600">72.4%</td>
+      </tr>
+      <tr>
+        <td>Adv-GRPO vs SD3</td>
+        <td style="color:var(--accent-purple);font-weight:600">70.0%</td>
+        <td style="color:var(--accent-purple);font-weight:600">72.4%</td>
+      </tr>
+    </table>
+  </div>
+
+  <div class="highlight-box purple">
+    <strong>核心结论</strong>
+    Adv-GRPO 从对抗博弈机制层面防止 Reward Hacking：学习型奖励以参考图像为正样本监督，直接通过视觉输出引导生成器，而非 KL 约束参数空间。DINO 等视觉基础模型提供密集信号，取代易被 hack 的标量奖励。
+  </div>
+</div>
+
+<!-- 5. Engineering Practices -->
+<div class="section">
+  <div class="section-title">
+    <span class="icon" style="background:var(--accent-amber)">5</span>
+    工程实践层面常用策略
+  </div>
+
+  <table>
+    <tr>
+      <th>策略</th>
+      <th>具体做法</th>
+      <th>效果</th>
+      <th>局限</th>
+    </tr>
+    <tr>
+      <td><strong>多 Reward 简单加权</strong></td>
+      <td>R = &alpha;R<sub>1</sub> + &beta;R<sub>2</sub>（如 HPS+CLIP）</td>
+      <td>部分缓解 Hacking</td>
+      <td>仍基于点式分数，虚假优势根因未解决</td>
+    </tr>
+    <tr>
+      <td><strong>KL 散度惩罚</strong></td>
+      <td>&beta; &middot; KL(&pi;<sub>&theta;</sub>, &pi;<sub>ref</sub>) 约束策略偏离</td>
+      <td>防止策略过度更新</td>
+      <td>限制探索能力，不解决多 Reward 不均衡</td>
+    </tr>
+    <tr>
+      <td><strong>奖励模型集成</strong></td>
+      <td>多个 RM 投票/平均</td>
+      <td>降低单个 RM 偏差和方差</td>
+      <td>计算开销大，仍基于点式分数范式</td>
+    </tr>
+    <tr>
+      <td><strong>训练调度策略</strong></td>
+      <td>早停 / 系数衰减 / 课程学习</td>
+      <td>减缓 Hacking 发生速度</td>
+      <td>治标不治本，依赖人工经验</td>
+    </tr>
+    <tr>
+      <td><strong>奖励系数课程</strong></td>
+      <td>训练前期侧重难优化 Reward，后期均衡</td>
+      <td>避免简单 Reward 先被 hack</td>
+      <td>需要精心设计调度方案</td>
+    </tr>
+  </table>
+</div>
+
+<!-- 6. Comprehensive Comparison -->
+<div class="section">
+  <div class="section-title">
+    <span class="icon" style="background:var(--accent-teal)">6</span>
+    方法综合对比与选型建议
+  </div>
+
+  <div class="subsection-title">全维度对比</div>
+  <table>
+    <tr>
+      <th>维度</th>
+      <th>MO-GRPO</th>
+      <th>PREF-GRPO</th>
+      <th>Adv-GRPO</th>
+    </tr>
+    <tr>
+      <td><strong>防 Hacking 层级</strong></td>
+      <td>权重归一化</td>
+      <td>奖励范式变革</td>
+      <td>对抗博弈机制</td>
+    </tr>
+    <tr>
+      <td><strong>核心修改</strong></td>
+      <td>优势函数计算顺序</td>
+      <td>Reward 模型类型</td>
+      <td>奖励机制 + 判别器</td>
+    </tr>
+    <tr>
+      <td><strong>实现复杂度</strong></td>
+      <td style="color:var(--accent-green)">低（改动最小）</td>
+      <td style="color:var(--accent-amber)">中（需 PPRM）</td>
+      <td style="color:var(--accent-red)">高（训练判别器）</td>
+    </tr>
+    <tr>
+      <td><strong>额外计算开销</strong></td>
+      <td style="color:var(--accent-green)">几乎无</td>
+      <td>O(G&sup2;) 成对比较</td>
+      <td>判别器训练开销</td>
+    </tr>
+    <tr>
+      <td><strong>仿射变换不变性</strong></td>
+      <td style="color:var(--accent-green)">&check;</td>
+      <td>N/A（胜率已归一化）</td>
+      <td>N/A（学习型奖励）</td>
+    </tr>
+    <tr>
+      <td><strong>需手动调参</strong></td>
+      <td style="color:var(--accent-green)">否</td>
+      <td>需选 PPRM</td>
+      <td>需选参考图像 + 判别器</td>
+    </tr>
+    <tr>
+      <td><strong>图像领域专用</strong></td>
+      <td>否（通用）</td>
+      <td style="color:var(--accent-green)">是（T2I 优化）</td>
+      <td style="color:var(--accent-green)">是（T2I 优化）</td>
+    </tr>
+    <tr>
+      <td><strong>风格定制能力</strong></td>
+      <td>否</td>
+      <td>否</td>
+      <td style="color:var(--accent-green)">是（RL 分布迁移）</td>
+    </tr>
+  </table>
+
+  <div class="subsection-title">防 Hacking 效果递进图</div>
+  <div class="ladder">
+    <div class="ladder-step">
+      <span class="ladder-label">Level 1</span>
+      <div class="ladder-bar" style="width:18%;background:#d97706">简单加权</div>
+    </div>
+    <div class="ladder-step">
+      <span class="ladder-label">Level 2</span>
+      <div class="ladder-bar" style="width:32%;background:#ca8a04">KL 惩罚</div>
+    </div>
+    <div class="ladder-step">
+      <span class="ladder-label">Level 3</span>
+      <div class="ladder-bar" style="width:46%;background:#65a30d">RM 集成</div>
+    </div>
+    <div class="ladder-step">
+      <span class="ladder-label">Level 4</span>
+      <div class="ladder-bar" style="width:62%;background:#2563eb">MO-GRPO</div>
+    </div>
+    <div class="ladder-step">
+      <span class="ladder-label">Level 5</span>
+      <div class="ladder-bar" style="width:80%;background:#16a34a">PREF-GRPO</div>
+    </div>
+    <div class="ladder-step">
+      <span class="ladder-label">Level 6</span>
+      <div class="ladder-bar" style="width:96%;background:#7c3aed">Adv-GRPO</div>
+    </div>
+  </div>
+
+  <div class="subsection-title">选型建议</div>
+  <div class="highlight-box teal">
+    <strong>快速修复 / 通用场景</strong>
+    选择 <strong>MO-GRPO</strong>：改动最小（仅改变优势函数计算顺序），即插即用，无需额外模型或调参。适用于任何多 Reward 的 GRPO 场景。
+  </div>
+  <div class="highlight-box green">
+    <strong>图像生成专用 / 追求稳定训练</strong>
+    选择 <strong>PREF-GRPO</strong>：针对 T2I 虚假优势问题设计，从奖励范式层面解决根因。需配备成对偏好 Reward 模型（如 UnifiedReward-Think）。
+  </div>
+  <div class="highlight-box purple">
+    <strong>追求最强防 Hacking / 需要风格定制</strong>
+    选择 <strong>Adv-GRPO</strong>：对抗机制从根本上避免被 hack，DINO 提供密集视觉信号。需额外训练判别器 + 准备参考图像集，实现最复杂。
+  </div>
+  <div class="highlight-box amber">
+    <strong>工程落地组合拳</strong>
+    <strong>MO-GRPO + KL 惩罚 + 早停</strong>：兼顾效果和实现成本，适合生产环境快速部署。MO-GRPO 处理多 Reward 均衡，KL 惩罚限制策略偏离，早停防止过优化。
+  </div>
+</div>
+
+<!-- 7. References -->
+<div class="section">
+  <div class="section-title">
+    <span class="icon" style="background:var(--text-tertiary)">7</span>
+    参考文献
+  </div>
+  <ol style="font-size:14px; line-height:2">
+    <li><strong>MO-GRPO</strong>: "Mitigating Reward Hacking of Group Relative Policy Optimization in Multi-Objective Settings", arXiv:2509.22047, 2025.09</li>
+    <li><strong>PREF-GRPO</strong>: 复旦大学 & 腾讯，"基于成对偏好奖励的 GRPO 方法缓解文生图 Reward Hacking"，2025.09</li>
+    <li><strong>Adv-GRPO</strong>: "The Image as Its Own Reward: Reinforcement Learning with Visual Foundation Models at Scale", CVPR 2026, NUS Show Lab & ByteDance</li>
+    <li><strong>GRPO 原始</strong>: DeepSeek-R1, "Group Relative Policy Optimization", 2025</li>
+    <li><strong>Dr. GRPO</strong>: "Dr. GRPO: The Graceful GRPO", 2025</li>
+    <li><strong>UnifiedReward-Think</strong>: 成对偏好 Reward 模型，PREF-GRPO 所用 PPRM</li>
+  </ol>
+</div>
+
+</div>
+</body>
+</html>
