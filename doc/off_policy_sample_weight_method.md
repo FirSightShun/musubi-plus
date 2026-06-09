@@ -1,4 +1,4 @@
-# 困难样本学习：musubi-tuner 框架扩展方案
+# Off-Policy Sample-Weight Method：musubi-tuner 框架扩展方案
 
 **2026-06-05**
 
@@ -354,7 +354,7 @@ with open("sample_weights.json", "w") as f:
 
 ## 5. 与数据复制方案的对比
 
-| 维度 | 数据复制 | 样本加权 loss |
+| 维度 | 数据复制 | Off-Policy 样本加权 |
 |---|---|---|
 | 磁盘占用 | N × 原始数据 | 1 × 原始数据 + 1 个 JSON 文件 |
 | 每 epoch 步数 | N × 原始步数 | 等于原始步数 |

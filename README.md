@@ -117,55 +117,7 @@ accelerate launch qwen_image_train_network.py \
 
 ## 框架修改详解
 
-### (1) ItemInfo 扩展（image_video_dataset.py）
-
-```python
-class ItemInfo:
-    def __init__(self, ...):
-        ...
-        self.sample_weight: float = 1.0  # 新增：off-policy 权重
-```
-
-### (2) 数据集加载权重（image_video_dataset.py）
-
-```python
-def prepare_for_training(self, num_timestep_buckets=None):
-    sample_weights = {}
-    if self.sample_weight_file:
-        with open(self.sample_weight_file) as f:
-            sample_weights = json.load(f)
-
-    for cache_file in latent_cache_files:
-        item_info = ItemInfo(item_key, ...)
-        if sample_weights:
-            item_info.sample_weight = sample_weights.get(item_key, 1.0)
-```
-
-### (3) Batch 注入权重（image_video_dataset.py）
-
-```python
-sample_weights = [
-    getattr(item_info, "sample_weight", 1.0)
-    for item_info in bucket[start:end]
-]
-batch_tensor_data["sample_weight"] = torch.tensor(
-    sample_weights, dtype=torch.float32
-)
-```
-
-### (4) Loss 计算加权（hv_train_network.py）
-
-```python
-if "sample_weight" in batch:
-    # 空间维度求平均 → per-sample loss [B]
-    loss = loss.mean(dim=list(range(1, loss.ndim)))
-    # 注入 off-policy 样本权重
-    sample_w = batch["sample_weight"].to(loss.device, loss.dtype) \
-               * args.sample_weight_multiplier
-    loss = (loss * sample_w).mean()
-else:
-    loss = loss.mean()  # 向后兼容
-```
+详见 [doc/off_policy_sample_weight_method.md](doc/off_policy_sample_weight_method.md)，包含完整的问题背景、设计思路、逐文件代码改动及使用示例。
 
 ---
 
