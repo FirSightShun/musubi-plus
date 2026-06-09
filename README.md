@@ -1,31 +1,36 @@
-# musubi-plus: Sample-Weight Optimized Training Framework
+# musubi-plus: Off-Policy Sample-Weight Training Framework
 
-基于 [musubi-tuner](https://github.com/kohya-ss/musubi-tuner) 扩展的困难样本学习框架，支持 **per-sample weighted loss**。
+基于 [musubi-tuner](https://github.com/kohya-ss/musubi-tuner) 扩展的困难样本学习框架，支持 **off-policy per-sample weighted loss**。
+
+权重在训练前由外部策略（评估模型、人工标注、任意难度指标）离线计算，训练时固定注入——这是一种典型的 **off-policy** 思路：数据收集策略与训练策略解耦，无需在线反馈即可引导模型聚焦困难样本。
 
 ---
 
 ## TODO
 
-1. ~~add sample-weight method to the project~~ ✓ 已完成
+1. ~~add off-policy sample-weight method to the project~~ ✓ 已完成
 2. add GRPO support to the project
 
 ---
 
 ## 核心特性
 
-### 样本加权损失（Sample-Weighted Loss）
+### Off-Policy 样本加权损失（Off-Policy Sample-Weighted Loss）
 
-传统做法是复制困难样本（数据膨胀），本方案改为在 loss 计算时直接加权：
+传统做法是复制困难样本（数据膨胀），本方案改为在 loss 计算时直接注入离线权重：
 
 ```
-原版 musubi-tuner:  loss = loss.mean()  # 所有样本等权
-musubi-plus:        loss = (loss * sample_weight).mean()  # 按样本难度加权
+原版 musubi-tuner:  loss = loss.mean()                        # 所有样本等权
+musubi-plus:        loss = (loss * sample_weight).mean()      # off-policy 难度加权
 ```
+
+**设计理念：** 权重由独立的评估策略预先计算，与训练过程完全解耦。训练时模型只负责学习，权重调整无需重新收集数据。
 
 **优势：**
 - 磁盘占用不变（无需复制数据）
 - 权重连续可调（任意浮点数，非整数倍复制）
 - 训练速度不变（仅 loss 计算多一次乘法）
+- 策略与训练解耦（改 JSON 即可切换权重策略）
 - 完全向后兼容（不传 `--sample_weight_file` 时行为与原版一致）
 
 ---
@@ -49,7 +54,7 @@ musubi-plus/
 
 ## 使用方法
 
-### 1. 生成样本权重文件
+### 1. 生成样本权重文件（离线评估阶段）
 
 用任何指标评估样本难度，映射为权重，输出 JSON：
 
@@ -67,16 +72,14 @@ musubi-plus/
 import json
 
 def score_to_weight(score: float) -> float:
-    """将难度得分映射为训练权重（示例：线性映射）"""
     threshold = 3.0
     alpha = 0.3
     excess = max(0.0, score - threshold)
     return 1.0 + alpha * excess
 
-# 你的评估逻辑
 weights = {}
 for sample in your_samples:
-    difficulty = evaluate_difficulty(sample)  # 任意指标
+    difficulty = evaluate_difficulty(sample)  # 任意离线指标
     weights[sample.stem] = score_to_weight(difficulty)
 
 with open("sample_weights.json", "w") as f:
@@ -96,7 +99,7 @@ with open("sample_weights.json", "w") as f:
 
 ---
 
-### 2. 训练时指定权重文件
+### 2. 训练时注入权重（训练阶段）
 
 ```bash
 accelerate launch qwen_image_train_network.py \
@@ -107,8 +110,8 @@ accelerate launch qwen_image_train_network.py \
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
-| `--sample_weight_file` | None | 权重 JSON 文件路径（不传则所有样本权重为 1.0） |
-| `--sample_weight_multiplier` | 1.0 | 全局倍率（用于实验调参） |
+| `--sample_weight_file` | None | 离线权重 JSON 文件路径（不传则所有样本权重为 1.0） |
+| `--sample_weight_multiplier` | 1.0 | 全局倍率（用于实验调参，不改 JSON 即可缩放强度） |
 
 ---
 
@@ -120,7 +123,7 @@ accelerate launch qwen_image_train_network.py \
 class ItemInfo:
     def __init__(self, ...):
         ...
-        self.sample_weight: float = 1.0  # 新增
+        self.sample_weight: float = 1.0  # 新增：off-policy 权重
 ```
 
 ### (2) 数据集加载权重（image_video_dataset.py）
@@ -131,7 +134,7 @@ def prepare_for_training(self, num_timestep_buckets=None):
     if self.sample_weight_file:
         with open(self.sample_weight_file) as f:
             sample_weights = json.load(f)
-    
+
     for cache_file in latent_cache_files:
         item_info = ItemInfo(item_key, ...)
         if sample_weights:
@@ -156,7 +159,7 @@ batch_tensor_data["sample_weight"] = torch.tensor(
 if "sample_weight" in batch:
     # 空间维度求平均 → per-sample loss [B]
     loss = loss.mean(dim=list(range(1, loss.ndim)))
-    # 乘以样本权重
+    # 注入 off-policy 样本权重
     sample_w = batch["sample_weight"].to(loss.device, loss.dtype) \
                * args.sample_weight_multiplier
     loss = (loss * sample_w).mean()
@@ -168,19 +171,20 @@ else:
 
 ## 与数据复制的对比
 
-| 维度 | 数据复制 | 样本加权 loss |
+| 维度 | 数据复制 | Off-Policy 样本加权 |
 |---|---|---|
 | 磁盘占用 | N × 原始数据 | 1 × 原始数据 + 1 个 JSON |
 | 每 epoch 步数 | N × 原始步数 | 等于原始步数 |
 | 权重精度 | 整数（1×、2×） | 任意浮点数 |
 | 训练速度 | 与数据量成正比变慢 | 不变 |
 | 调参灵活性 | 需重新生成数据 | 改 JSON 即可 |
+| 策略解耦 | 否 | 是（评估与训练完全分离） |
 
 ---
 
 ## 适用场景
 
-任何图像/视频生成模型的微调任务，只要能找到某种"难度指标"：
+任何图像/视频生成模型的微调任务，只要能找到某种离线"难度指标"：
 
 | 任务 | 难度指标示例 |
 |---|---|
@@ -206,7 +210,7 @@ uv sync --extra cu128
 ## 注意事项
 
 1. **权重与 loss 绝对值：** 加权后的 loss 绝对值会比不加权时高，两者不可直接比较
-2. **静态权重：** 当前方案是训练前计算一次权重。如果模型能力显著提升，可重新生成权重文件
+2. **静态权重：** 当前方案是训练前离线计算一次权重。如果模型能力显著提升，可重新运行评估策略生成新权重文件
 3. **未覆盖的样本：** JSON 中没有出现的样本默认取 weight=1.0
 4. **Video dataset：** 当前改动仅覆盖 ImageDataset，VideoDataset 需做类似扩展
 
