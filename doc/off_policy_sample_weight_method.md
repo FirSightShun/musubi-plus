@@ -55,6 +55,8 @@
 
 ![Off-Policy Sample-Weight Pipeline](off_policy_pipeline.svg)
 
+> 离线阶段（蓝）与训练阶段（绿）通过 `sample_weights.json` 连接，两侧策略完全独立。
+
 **关键解耦：** 离线阶段产出 `sample_weights.json`，训练阶段消费它。两个阶段通过一个标准化的 JSON 协议连接。
 
 ### 2.2 权重文件格式（协议约定）
