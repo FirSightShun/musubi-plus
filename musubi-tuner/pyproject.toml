@@ -24,6 +24,7 @@ dependencies = [
     "easydict==1.13",
     # FLUX.1 Kontext
     "sentencepiece==0.2.1",
+    "tomli>=2.4.1",
 ]
 
 [project.optional-dependencies]

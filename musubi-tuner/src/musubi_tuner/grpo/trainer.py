@@ -263,7 +263,8 @@ class GRPOTrainer:
         target = noise - latents  # [B, C, F, H, W]
 
         # Build batch dict for call_dit (maps GRPO sample_parameter keys to batch keys)
-        batch_for_dit = self._build_batch_dict(sample_parameters, param_indices, bsz, device)
+        # Pass latents so architectures that read batch["latents"] (e.g. qwen_image) work correctly.
+        batch_for_dit = self._build_batch_dict(sample_parameters, param_indices, bsz, device, latents=latents)
 
         # ── 5a. Advantage-weighted loss (with grad) ─────────────────────────
         model_pred, _ = self.base.call_dit(
@@ -319,6 +320,9 @@ class GRPOTrainer:
         """VAE-encode PIL images to latent tensors.
 
         Returns a [B, C, F, H, W] tensor in VAE latent space (pre-scale_shift_latents).
+        Supports two VAE families:
+        - diffusers-style: has .config.scaling_factor, encode() returns latent_dist
+        - qwen_image-style: has .latents_mean/.latents_std, exposes encode_pixels_to_latents()
         """
         device = self.accelerator.device
         self.vae.to(device)
@@ -330,28 +334,30 @@ class GRPOTrainer:
             t = torch.from_numpy(arr).permute(2, 0, 1)  # [3, H, W]
             frames.append(t)
 
-        # Stack into [B, 3, H, W]
-        imgs_t = torch.stack(frames).to(device=device, dtype=self.vae.dtype)
-        # Normalise to [-1, 1] (standard VAE input)
-        imgs_t = imgs_t * 2.0 - 1.0
-        # Reshape to video format: [B, C, 1, H, W]
-        imgs_t = imgs_t.unsqueeze(2)
+        imgs_t = torch.stack(frames).to(device=device, dtype=self.vae.dtype)  # [B, 3, H, W]
 
         with torch.no_grad():
-            # Most diffusers VAEs expose encode → latent_dist
-            latent_dist = self.vae.encode(imgs_t)
-            if hasattr(latent_dist, "latent_dist"):
-                latents = latent_dist.latent_dist.sample()
-            elif hasattr(latent_dist, "sample"):
-                latents = latent_dist.sample()
+            if hasattr(self.vae, "latents_mean"):
+                # qwen_image VAE: encode_pixels_to_latents handles [-1,1] norm and mean/std scaling
+                # Input expected in [0, 1]; unsqueeze temporal dim handled internally
+                latents = self.vae.encode_pixels_to_latents(imgs_t)  # [B, C, 1, H, W]
             else:
-                latents = latent_dist
+                # diffusers-style VAE
+                imgs_t = imgs_t * 2.0 - 1.0          # [0,1] → [-1,1]
+                imgs_t = imgs_t.unsqueeze(2)           # [B, C, H, W] → [B, C, 1, H, W]
+                latent_dist = self.vae.encode(imgs_t)
+                if hasattr(latent_dist, "latent_dist"):
+                    latents = latent_dist.latent_dist.sample()
+                elif hasattr(latent_dist, "sample"):
+                    latents = latent_dist.sample()
+                else:
+                    latents = latent_dist
 
-            # Apply scaling factor to match training latent scale
-            if hasattr(self.vae.config, "shift_factor") and self.vae.config.shift_factor:
-                latents = (latents - self.vae.config.shift_factor) * self.vae.config.scaling_factor
-            elif hasattr(self.vae.config, "scaling_factor"):
-                latents = latents * self.vae.config.scaling_factor
+                if hasattr(self.vae, "config"):
+                    if getattr(self.vae.config, "shift_factor", None):
+                        latents = (latents - self.vae.config.shift_factor) * self.vae.config.scaling_factor
+                    elif getattr(self.vae.config, "scaling_factor", None):
+                        latents = latents * self.vae.config.scaling_factor
 
         self.vae.to("cpu")
         return latents.float()
@@ -362,21 +368,16 @@ class GRPOTrainer:
         param_indices: list[int],
         bsz: int,
         device: torch.device,
-    ) -> dict[str, torch.Tensor]:
+        latents: Optional[torch.Tensor] = None,
+    ) -> dict:
         """Build a batch dict compatible with base_trainer.call_dit().
 
-        ``call_dit`` expects keys ``llm``, ``llm_mask``, ``clipL``.
-        ``process_sample_prompts`` stores them as ``llm_embeds``, ``llm_mask``,
-        ``clipL_embeds``.  We remap here.
+        Automatically detects the embed format from the first sample parameter:
+        - HunyuanVideo / hv:  llm_embeds, llm_mask, clipL_embeds → llm, llm_mask, clipL
+        - qwen_image:         vl_embed (list of variable-len tensors)
         """
-        llm_list, llm_mask_list, clipl_list = [], [], []
-        for idx in param_indices:
-            sp = sample_parameters[idx]
-            llm_list.append(sp["llm_embeds"].to(device))
-            llm_mask_list.append(sp["llm_mask"].to(device))
-            clipl_list.append(sp["clipL_embeds"].to(device))
+        first_sp = sample_parameters[param_indices[0]]
 
-        # Pad to the same sequence length along dim 1 before stacking
         def _pad_stack(tensors: list[torch.Tensor]) -> torch.Tensor:
             max_len = max(t.shape[1] if t.ndim > 1 else 1 for t in tensors)
             padded = []
@@ -387,11 +388,26 @@ class GRPOTrainer:
                 padded.append(t)
             return torch.stack(padded, dim=0)
 
-        return {
-            "llm": _pad_stack(llm_list),
-            "llm_mask": _pad_stack(llm_mask_list),
-            "clipL": _pad_stack(clipl_list),
-        }
+        if "vl_embed" in first_sp:
+            # qwen_image: vl_embed stored as [1, L, D] (with batch dim); call_dit expects list of [L, D]
+            vl_list = [sample_parameters[idx]["vl_embed"].squeeze(0).to(device) for idx in param_indices]
+            batch: dict = {"vl_embed": vl_list}
+        else:
+            # HunyuanVideo-style
+            llm_list = [sample_parameters[idx]["llm_embeds"].to(device) for idx in param_indices]
+            mask_list = [sample_parameters[idx]["llm_mask"].to(device) for idx in param_indices]
+            clip_list = [sample_parameters[idx]["clipL_embeds"].to(device) for idx in param_indices]
+            batch = {
+                "llm": _pad_stack(llm_list),
+                "llm_mask": _pad_stack(mask_list),
+                "clipL": _pad_stack(clip_list),
+            }
+
+        # qwen_image's call_dit reads batch["latents"] directly
+        if latents is not None:
+            batch["latents"] = latents
+
+        return batch
 
 
 # ---------------------------------------------------------------------------

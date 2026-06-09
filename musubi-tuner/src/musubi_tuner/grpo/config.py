@@ -1,7 +1,10 @@
 """GRPO configuration dataclasses with TOML loading."""
 from __future__ import annotations
 
-import tomllib
+try:
+    import tomllib
+except ImportError:  # Python < 3.11
+    import tomli as tomllib  # type: ignore[no-redef]
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any

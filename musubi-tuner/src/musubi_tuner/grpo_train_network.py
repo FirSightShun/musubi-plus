@@ -48,7 +48,21 @@ def _import_trainer(architecture: str):
     if module_path is None:
         raise ValueError(f"Unknown architecture '{architecture}'. Available: {list(ARCH_TRAINERS)}")
     mod = importlib.import_module(module_path)
-    return mod.NetworkTrainer, getattr(mod, "setup_parser_common", None), mod
+
+    # Find the concrete trainer class: prefer the arch-specific subclass over the base NetworkTrainer.
+    # Each train_network module has a main() that instantiates the actual class — scan for it.
+    import inspect
+    from musubi_tuner.hv_train_network import NetworkTrainer as _BaseTrainer
+
+    # Look for all subclasses of NetworkTrainer defined directly in this module
+    arch_classes = [
+        cls
+        for _, cls in inspect.getmembers(mod, inspect.isclass)
+        if issubclass(cls, _BaseTrainer) and cls is not _BaseTrainer and cls.__module__ == mod.__name__
+    ]
+    trainer_cls = arch_classes[0] if arch_classes else getattr(mod, "NetworkTrainer", _BaseTrainer)
+
+    return trainer_cls, getattr(mod, "setup_parser_common", None), mod
 
 
 def main():
@@ -109,7 +123,7 @@ def _grpo_loop(base_trainer, args, grpo_config, pre_args):
     from musubi_tuner.grpo.trainer import GRPOTrainer
 
     # ── Accelerator ─────────────────────────────────────────────────────────
-    timeout = getattr(args, "ddp_timeout", 3600)
+    timeout = getattr(args, "ddp_timeout", None) or 3600
     kwargs = InitProcessGroupKwargs(timeout=timedelta(seconds=timeout))
 
     mixed_precision = getattr(args, "mixed_precision", "bf16") or "bf16"
@@ -137,12 +151,32 @@ def _grpo_loop(base_trainer, args, grpo_config, pre_args):
     if not hasattr(args, "vae") or args.vae is None:
         raise ValueError("--vae is required")
 
-    # Determine attention mode
-    attn_mode = "sdpa"
-    for mode in ("sdpa", "flash_attn", "flash3", "sageattn", "xformers"):
-        if getattr(args, mode.replace("-", "_"), False) or getattr(args, mode, False):
+    # Determine attention mode — delegate to base_trainer if it exposes a helper,
+    # otherwise scan CLI flags. "sdpa" maps to "torch" for architectures that
+    # use the hunyuan attention MEMORY_LAYOUT (qwen_image, hv, wan).
+    attn_mode = getattr(args, "attn_mode", None) or "torch"
+    for flag, mode in (
+        ("flash_attn", "flash"),
+        ("flash3", "flash"),
+        ("sageattn", "sageattn"),
+        ("xformers", "xformers"),
+    ):
+        if getattr(args, flag, False):
             attn_mode = mode
             break
+
+    # qwen_image: resolve_model_version_args must run before handle_model_specific_args
+    # to populate args.is_edit / args.is_layered from --model_version.
+    if hasattr(args, "model_version") and not hasattr(args, "is_edit"):
+        try:
+            from musubi_tuner.qwen_image import qwen_image_utils
+            qwen_image_utils.resolve_model_version_args(args)
+        except Exception:
+            pass
+
+    # handle_model_specific_args must come first — some architectures set attrs
+    # (e.g. qwen_image sets args.is_layered) that load_vae / load_transformer read.
+    base_trainer.handle_model_specific_args(args)
 
     vae_dtype = weight_dtype
     vae = base_trainer.load_vae(args, vae_dtype, args.vae)
@@ -183,15 +217,28 @@ def _grpo_loop(base_trainer, args, grpo_config, pre_args):
             key, value = net_arg.split("=", 1)
             net_kwargs[key] = value
 
-    network = network_module.create_arch_network(
-        1.0,
-        args.network_dim,
-        getattr(args, "network_alpha", None) or args.network_dim,
-        transformer,
-        neuron_dropout=getattr(args, "network_dropout", None),
-        **net_kwargs,
-    )
-    network.apply_to(transformer, train_unet=True, train_text_encoder=False)
+    if hasattr(network_module, "create_arch_network"):
+        network = network_module.create_arch_network(
+            1.0,
+            args.network_dim,
+            getattr(args, "network_alpha", None) or args.network_dim,
+            vae,
+            None,
+            transformer,
+            neuron_dropout=getattr(args, "network_dropout", None),
+            **net_kwargs,
+        )
+    else:
+        network = network_module.create_network(
+            1.0,
+            args.network_dim,
+            getattr(args, "network_alpha", None) or args.network_dim,
+            vae,
+            None,
+            transformer,
+            **net_kwargs,
+        )
+    network.apply_to(None, transformer, apply_text_encoder=False, apply_unet=True)
     network.to(device, dtype=network_dtype)
 
     # ── Optimizer ────────────────────────────────────────────────────────────
@@ -200,10 +247,15 @@ def _grpo_loop(base_trainer, args, grpo_config, pre_args):
     optimizer = torch.optim.AdamW(trainable_params, lr=lr)
 
     # ── Process sample prompts (text encoding) ────────────────────────────────
-    if not hasattr(args, "text_encoder1") or args.text_encoder1 is None:
-        raise ValueError("--text_encoder1 is required for GRPO (used for online prompt encoding)")
+    # Check for text encoder argument (different architectures use different names)
+    has_te = (
+        (hasattr(args, "text_encoder1") and args.text_encoder1 is not None)  # HunyuanVideo, Wan, etc.
+        or (hasattr(args, "text_encoder") and args.text_encoder is not None)  # qwen_image
+        or (hasattr(args, "text_encoder_path") and args.text_encoder_path is not None)  # some variants
+    )
+    if not has_te:
+        raise ValueError("A text encoder argument is required for GRPO online prompt encoding (--text_encoder / --text_encoder1)")
 
-    base_trainer.handle_model_specific_args(args)
     sample_parameters = base_trainer.process_sample_prompts(args, accelerator, pre_args.prompt_file)
 
     # ── Prepare with accelerator ──────────────────────────────────────────────
