@@ -1,105 +1,26 @@
-# musubi-plus: Off-Policy Sample-Weight Training Framework
+# musubi-plus
 
-基于 [musubi-tuner](https://github.com/kohya-ss/musubi-tuner) 扩展的困难样本学习框架，支持 **off-policy per-sample weighted loss**。
+基于 [musubi-tuner](https://github.com/kohya-ss/musubi-tuner) 的强化学习增强训练框架，将两种互补的 RL 思路引入图像/视频生成模型微调：
 
-权重在训练前由外部策略（评估模型、人工标注、任意难度指标）离线计算，训练时固定注入——这是一种典型的 **off-policy** 思路：数据收集策略与训练策略解耦，无需在线反馈即可引导模型聚焦困难样本。
-
----
-
-## TODO
-
-1. ~~add off-policy sample-weight method to the project~~ ✓ 已完成
-2. add GRPO support to the project
-
----
-
-## 核心特性
-
-### Off-Policy 样本加权损失（Off-Policy Sample-Weighted Loss）
-
-传统做法是复制困难样本（数据膨胀），本方案改为在 loss 计算时直接注入离线权重：
-
-```
-原版 musubi-tuner:  loss = loss.mean()                        # 所有样本等权
-musubi-plus:        loss = (loss * sample_weight).mean()      # off-policy 难度加权
-```
-
-**设计理念：** 权重由独立的评估策略预先计算，与训练过程完全解耦。训练时模型只负责学习，权重调整无需重新收集数据。
-
-**优势：**
-- 磁盘占用不变（无需复制数据）
-- 权重连续可调（任意浮点数，非整数倍复制）
-- 训练速度不变（仅 loss 计算多一次乘法）
-- 策略与训练解耦（改 JSON 即可切换权重策略）
-- 完全向后兼容（不传 `--sample_weight_file` 时行为与原版一致）
-
----
-
-## 文件结构
-
-```
-musubi-plus/
-└── musubi-tuner/                   # 修改后的训练框架
-    ├── src/musubi_tuner/
-    │   ├── dataset/
-    │   │   ├── image_video_dataset.py    # +4 处改动（ItemInfo、加载、batch）
-    │   │   └── config_utils.py            # +2 处改动（schema、参数）
-    │   └── hv_train_network.py            # +2 处改动（loss 计算、argparse）
-    ├── qwen_image_train_network.py        # Qwen-Image-Edit 训练入口
-    ├── qwen_image_cache_latents.py        # VAE latent 缓存
-    └── ...                                # 其他模型的训练脚本
-```
-
----
-
-## 使用方法
-
-### 1. 生成样本权重文件（离线评估阶段）
-
-用任何指标评估样本难度，映射为权重，输出 JSON：
-
-```json
-{
-  "sample_stem_001": 2.5,
-  "sample_stem_002": 1.0,
-  "sample_stem_003": 7.3
-}
-```
-
-**权重生成示例（Python）：**
-
-```python
-import json
-
-def score_to_weight(score: float) -> float:
-    threshold = 3.0
-    alpha = 0.3
-    excess = max(0.0, score - threshold)
-    return 1.0 + alpha * excess
-
-weights = {}
-for sample in your_samples:
-    difficulty = evaluate_difficulty(sample)  # 任意离线指标
-    weights[sample.stem] = score_to_weight(difficulty)
-
-with open("sample_weights.json", "w") as f:
-    json.dump(weights, f, indent=2)
-```
-
-**常见映射函数：**
-
-| 映射函数 | 公式 | 适用场景 |
+| 方法 | 核心思路 | 状态 |
 |---|---|---|
-| **线性** | `w = 1 + α × max(0, s − τ)` | 得分与难度线性相关 |
-| **平方根** | `w = 1 + α × √max(0, s − τ)` | 得分差异大，需要平滑 |
-| **对数** | `w = 1 + α × ln(1 + max(0, s − τ))` | 得分范围极宽 |
-| **分位数** | `w = 1 + α × rank(s) / N` | 只关心相对排序 |
-
-其中 `s` 是难度得分，`τ` 是阈值，`α` 是强度系数。
+| **Off-Policy Sample-Weight** | 离线评估样本难度，训练时直接加权 loss | ✅ 已完成 |
+| **GRPO** | 在线策略梯度，用多维 Reward 模型引导生成质量 | 🚧 开发中 |
 
 ---
 
-### 2. 训练时注入权重（训练阶段）
+## Feature 1：Off-Policy Sample-Weight Method
+
+权重在训练前由外部策略离线计算（任意难度指标），训练时固定注入，**评估策略与训练策略完全解耦**。
+
+```
+原版 musubi-tuner:  loss = loss.mean()
+musubi-plus:        loss = (loss * sample_weight).mean()
+```
+
+**优势：** 零磁盘膨胀、浮点精度权重、训练速度不变、改 JSON 即可切换策略。
+
+使用方法：
 
 ```bash
 accelerate launch qwen_image_train_network.py \
@@ -108,43 +29,34 @@ accelerate launch qwen_image_train_network.py \
     ...
 ```
 
-| 参数 | 默认值 | 说明 |
+详细设计与框架改动见 [doc/off_policy_sample_weight_method.md](doc/off_policy_sample_weight_method.md)。
+
+---
+
+## Feature 2：GRPO（开发中）
+
+将 GRPO（Group Relative Policy Optimization）引入 musubi-tuner，实现在线 RL 训练循环。调研覆盖当前主流变体：
+
+- **DanceGRPO** — 统一支持 Diffusion / Rectified Flow，覆盖文生图、文生视频、图像编辑
+- **Flow-GRPO** — 首个将在线策略梯度整合进 Flow Matching 的方法，支持 9 种 Reward 灵活组合
+- **Adv-GRPO** — 引入对抗性奖励（DINOv2），缓解 Reward Hacking，支持风格迁移
+- **MO-GRPO** — 多目标设置下防 Reward Hacking，先归一化再聚合
+- **PREF-GRPO** — 以成对偏好胜率替代绝对分数，从奖励建模层面消除打分偏差
+
+Reward Model 体系调研见 [doc/grpo_reward_model_report.html](doc/grpo_reward_model_report.html)，防 Reward Hacking 方案对比见 [doc/GRPO_MultiReward_AntiHacking_Report.html](doc/GRPO_MultiReward_AntiHacking_Report.html)。
+
+---
+
+## 两种方法的定位
+
+| 维度 | Off-Policy Sample-Weight | GRPO |
 |---|---|---|
-| `--sample_weight_file` | None | 离线权重 JSON 文件路径（不传则所有样本权重为 1.0） |
-| `--sample_weight_multiplier` | 1.0 | 全局倍率（用于实验调参，不改 JSON 即可缩放强度） |
+| 反馈时机 | 训练前离线评估 | 训练中在线采样 |
+| 实现复杂度 | 低（3 文件 8 处改动） | 高（需完整 RL 训练循环） |
+| 适用场景 | 有明确质量指标、追求轻量改造 | 追求生成质量上限、资源充足 |
+| 权重更新 | 静态（手动重跑评估脚本） | 动态（每步自动更新策略） |
 
----
-
-## 框架修改详解
-
-详见 [doc/off_policy_sample_weight_method.md](doc/off_policy_sample_weight_method.md)，包含完整的问题背景、设计思路、逐文件代码改动及使用示例。
-
----
-
-## 与数据复制的对比
-
-| 维度 | 数据复制 | Off-Policy 样本加权 |
-|---|---|---|
-| 磁盘占用 | N × 原始数据 | 1 × 原始数据 + 1 个 JSON |
-| 每 epoch 步数 | N × 原始步数 | 等于原始步数 |
-| 权重精度 | 整数（1×、2×） | 任意浮点数 |
-| 训练速度 | 与数据量成正比变慢 | 不变 |
-| 调参灵活性 | 需重新生成数据 | 改 JSON 即可 |
-| 策略解耦 | 否 | 是（评估与训练完全分离） |
-
----
-
-## 适用场景
-
-任何图像/视频生成模型的微调任务，只要能找到某种离线"难度指标"：
-
-| 任务 | 难度指标示例 |
-|---|---|
-| 图像修复 | PSNR / SSIM / LPIPS |
-| 图像编辑 | CLIP 语义一致性 |
-| 超分辨率 | HR-LR 重建误差 |
-| 风格迁移 | 风格损失 + 内容损失 |
-| 任意任务 | 人工标注难度等级 |
+两者可**组合使用**：用 Off-Policy 权重做课程采样，再用 GRPO 做在线策略优化。
 
 ---
 
@@ -155,16 +67,7 @@ cd musubi-tuner
 uv sync --extra cu128
 ```
 
-**关键：** torch 必须 pin 到 2.7.1+cu128（避免 CUDNN 兼容性问题）。
-
----
-
-## 注意事项
-
-1. **权重与 loss 绝对值：** 加权后的 loss 绝对值会比不加权时高，两者不可直接比较
-2. **静态权重：** 当前方案是训练前离线计算一次权重。如果模型能力显著提升，可重新运行评估策略生成新权重文件
-3. **未覆盖的样本：** JSON 中没有出现的样本默认取 weight=1.0
-4. **Video dataset：** 当前改动仅覆盖 ImageDataset，VideoDataset 需做类似扩展
+> torch 必须 pin 到 2.7.1+cu128，避免 CUDNN 兼容性问题。
 
 ---
 
