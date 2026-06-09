@@ -5,7 +5,7 @@
 | 方法 | 核心思路 | 状态 |
 |---|---|---|
 | **Off-Policy Sample-Weight** | 离线评估样本难度，训练时直接加权 loss | ✅ 已完成 |
-| **GRPO** | 在线策略梯度，用多维 Reward 模型引导生成质量 | 🚧 开发中 |
+| **GRPO** | 在线策略梯度，用多维 Reward 模型引导生成质量 | ✅ 已完成 |
 
 ---
 
@@ -33,17 +33,52 @@ accelerate launch qwen_image_train_network.py \
 
 ---
 
-## Feature 2：GRPO（开发中）
+## Feature 2：GRPO ✅
 
-将 GRPO（Group Relative Policy Optimization）引入 musubi-tuner，实现在线 RL 训练循环。调研覆盖当前主流变体：
+将 MO-GRPO（Multi-Objective GRPO + Flow Matching）引入 musubi-tuner，实现在线 RL 训练循环。
 
-- **DanceGRPO** — 统一支持 Diffusion / Rectified Flow，覆盖文生图、文生视频、图像编辑
-- **Flow-GRPO** — 首个将在线策略梯度整合进 Flow Matching 的方法，支持 9 种 Reward 灵活组合
-- **Adv-GRPO** — 引入对抗性奖励（DINOv2），缓解 Reward Hacking，支持风格迁移
-- **MO-GRPO** — 多目标设置下防 Reward Hacking，先归一化再聚合
-- **PREF-GRPO** — 以成对偏好胜率替代绝对分数，从奖励建模层面消除打分偏差
+**核心特性：**
+- **多 Reward 并联 + 防 Hacking**：每个 Reward 在 group 内独立归一化后再加权聚合，高方差 Reward 不能主导优势函数
+- **7 种内置 Reward**：HPSv2.1 / PickScore / ImageReward / CLIP 对齐 / OCR 文字准确率 / Qwen2-VL 语义评分 / CIEDE2000 色彩保真度（ΔE00）
+- **KL 惩罚**：训练开始时冻结参考策略，防止策略漂移
+- **架构无关**：通过 `--grpo_architecture` 支持所有 musubi-tuner 架构（hv / wan / fpack / flux / qwen_image 等）
 
-Reward Model 体系调研见 [doc/grpo_reward_model_report.html](doc/grpo_reward_model_report.html)，防 Reward Hacking 方案对比见 [doc/GRPO_MultiReward_AntiHacking_Report.html](doc/GRPO_MultiReward_AntiHacking_Report.html)。
+```toml
+# grpo_config.toml
+[grpo]
+architecture        = "qwen_image"
+group_size          = 8
+num_inference_steps = 20
+kl_coeff            = 0.01
+
+[[grpo.reward]]
+name   = "hps_v2"
+weight = 0.25
+
+[[grpo.reward]]
+name   = "clip"
+weight = 0.25
+
+[[grpo.reward]]
+name   = "delta_e00"
+weight = 0.5
+[grpo.reward.params]
+clip_max = 10.0
+```
+
+```bash
+accelerate launch --mixed_precision bf16 \
+    src/musubi_tuner/grpo_train_network.py \
+    --grpo_config grpo_config.toml \
+    --prompt_file prompts.jsonl \
+    --dit path/to/dit \
+    --vae path/to/vae \
+    --text_encoder1 path/to/text_encoder \
+    --network_module networks.lora \
+    --network_dim 32
+```
+
+设计文档见 [doc/grpo_method.md](doc/grpo_method.md)。调研覆盖：DanceGRPO、Flow-GRPO、Adv-GRPO、MO-GRPO、PREF-GRPO，详见 [doc/GRPO_MultiReward_AntiHacking_Report.html](doc/GRPO_MultiReward_AntiHacking_Report.html)。
 
 ---
 

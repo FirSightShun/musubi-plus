@@ -83,9 +83,38 @@ TOML config → BlueprintGenerator/ConfigSanitizer → ImageDataset/VideoDataset
 - **Train scripts** (`hv_train_network.py`, `wan_train_network.py`, etc.): Each wraps the shared train loop with architecture-specific model loading. The shared logic in `hv_train_network.py` is the most complete reference implementation.
 - **Memory management**: Key flags are `--blocks_to_swap` (CPU offload), `--fp8_base`, `--fp8_llm`, `--gradient_checkpointing`.
 
-### GRPO Work (next feature)
+### GRPO Module (`grpo/`)
 
-GRPO requires adding an online RL loop on top of the existing train scripts. Reference research is in `doc/GRPO_MultiReward_AntiHacking_Report.html` and `doc/grpo_reward_model_report.html`. Key design decisions still open: which GRPO variant (DanceGRPO / Flow-GRPO / Adv-GRPO), reward model selection, and where in the training loop to inject the policy gradient update.
+Implemented as an independent module under `musubi-tuner/src/musubi_tuner/grpo/`. Does **not** modify any existing files.
+
+```
+grpo/
+├── __init__.py
+├── config.py           # GRPOConfig / RewardConfig (TOML loading)
+├── trainer.py          # GRPOTrainer (composes NetworkTrainer, runs GRPO loop)
+├── advantage.py        # MO-GRPO advantage computation
+├── prompt_dataset.py   # PromptDataset (JSONL / txt)
+└── reward/
+    ├── base.py         # BaseReward ABC + @register decorator + build_rewards()
+    ├── hps.py          # HPSv2.1
+    ├── pickscore.py    # PickScore
+    ├── image_reward.py # ImageReward
+    ├── clip.py         # CLIP ViT-H-14
+    ├── ocr.py          # PaddleOCR text accuracy
+    ├── vlm.py          # Qwen2-VL semantic score
+    └── delta_e.py      # CIEDE2000 colour fidelity
+```
+
+Entry script: `grpo_train_network.py` (alongside the per-arch `*_train_network.py` files).
+
+Key design choices:
+- `GRPOTrainer` **composes** (holds) a `NetworkTrainer` instance; never inherits.
+- Architecture-specific operations (text encoding, DiT forward, VAE decode) delegate to `base_trainer` methods.
+- Phase 1 (no_grad): `base_trainer.do_inference()` → PIL images → reward scoring → MO-GRPO advantages.
+- Phase 2 (with_grad): VAE re-encode → `base_trainer.call_dit()` → advantage-weighted MSE + KL penalty.
+- Each reward is normalised independently within the group before aggregating (prevents high-variance rewards dominating).
+
+See `doc/grpo_method.md` for the full design document.
 
 ## Documentation
 
