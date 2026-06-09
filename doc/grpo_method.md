@@ -44,8 +44,8 @@ Off-Policy Sample-Weight 方案（已实现）建立了一条清晰的路径：*
 Off-Policy Sample-Weight 与 GRPO 在数学上是同一结构：
 
 ```
-Off-Policy:   loss = w_offline · ‖v_θ(x_t) − v*‖²     w 来自离线 JSON
-GRPO:         loss = A_online  · ‖v_θ(x_t) − v*‖²     A 来自在线采样 + reward
+Off-Policy:   loss = w_offline * ||v_θ(x_t) - v*||^2     w 来自离线 JSON
+GRPO:         loss = A_online  * ||v_θ(x_t) - v*||^2     A 来自在线采样 + reward
 ```
 
 区别只是**权重的来源**：离线静态 vs 在线动态。GRPO 是 Off-Policy Sample-Weight 的在线泛化。
@@ -71,11 +71,11 @@ advantage_i = reward_i − mean({reward_1, ..., reward_G})
 多个奖励直接相加的问题：高方差 reward（如 OCR 分数）会在归一化后产生更大的梯度，实际上劫持了训练。MO-GRPO 的解法是**先归一化，再聚合**：
 
 ```
-Ã_k^(i) = (r_k^(i) − μ_k) / (σ_k + ε)    # 每个 reward 组内独立归一化
-A^(i)   = Σ_k  w_k · Ã_k^(i)              # 归一化后再加权求和
+r_norm_k(i) = (r_k(i) - mean_k) / (std_k + eps)   # 每个 reward 组内独立归一化
+A(i)        = sum_k( w_k * r_norm_k(i) )            # 归一化后再加权求和
 ```
 
-其中 μ_k、σ_k 在同一 group 的 G 个样本上计算。每个 reward 在聚合前的贡献量级相同，权重 w_k 真实反映人的偏好比例，而不受 reward 值域影响。
+其中 `mean_k`、`std_k` 在同一 group 的 G 个样本上计算。每个 reward 在聚合前的贡献量级相同，权重 w_k 真实反映人的偏好比例，而不受 reward 值域影响。
 
 ### 2.5 Flow Matching GRPO Loss
 
@@ -86,16 +86,16 @@ x_t = (1 − t) · x_0 + t · ε,  ε ~ N(0, I)
 v_target = ε − x_0
 ```
 
-标准训练 loss 为 `L_FM = ‖v_θ(x_t, t, c) − v_target‖²`。GRPO 在此基础上乘以优势并加 KL 惩罚：
+标准训练 loss 为 `L_FM = ||v_θ(x_t, t, c) - v_target||^2`。GRPO 在此基础上乘以优势并加 KL 惩罚：
 
 ```
-L_GRPO = E_{i,t} [ A^(i) · ‖v_θ(x_t^(i), t, c) − v_target^(i)‖² ]
-       + β · E_t [ ‖v_θ(x_t, t, c) − v_ref(x_t, t, c)‖² ]
+L_GRPO = E[i,t][ A(i) * ||v_θ(x_t(i), t, c) - v_target(i)||^2 ]
+       + beta  * E[t] [ ||v_θ(x_t,    t, c) - v_ref(x_t, t, c)||^2 ]
 ```
 
-- `A^(i)` 为 MO-GRPO 优势（第 2.4 节），正值 = 鼓励，负值 = 抑制
+- `A(i)` 为 MO-GRPO 优势（第 2.4 节），正值 = 鼓励，负值 = 抑制
 - 第二项为 KL 惩罚，`v_ref` 是训练开始时冻结的参考策略，防止策略漂移过远
-- `x_t^(i)` 是对采样图像加噪得到的中间状态，**不参与梯度**（在线采样阶段已 `no_grad`）
+- `x_t(i)` 是对采样图像加噪得到的中间状态，**不参与梯度**（在线采样阶段已 `no_grad`）
 
 ---
 
