@@ -120,4 +120,6 @@ uv sync --extra cu128   # torch 2.7.1+cu128（推荐）
 
 ## 许可证
 
-musubi-tuner 原始代码遵循上游许可证（Apache 2.0）。本扩展的修改部分同样遵循 Apache 2.0。
+本项目所有代码遵循 [Apache License 2.0](LICENSE)。
+
+musubi-tuner 上游代码同样遵循 Apache 2.0，详见其原始仓库。
