@@ -348,3 +348,9 @@ accelerate launch --mixed_precision bf16 \
 4. **ΔE00 的参考图对齐**：参考图需与 prompt 严格对应（通过文件名匹配），`prompt_dataset.py` 负责此映射，参考图缺失时该样本的 `delta_e00` 奖励自动降权为 0。
 
 5. **多卡同步**：每个进程独立采样并打分，advantages 在 `accelerator.gather()` 后跨卡归一化，保证 group 统计量在全局 batch 上计算。
+
+---
+
+## 9. 延伸阅读
+
+相关算法调研（DanceGRPO、Flow-GRPO、Adv-GRPO、MO-GRPO、PREF-GRPO、图像编辑专用 Reward Model 训练方案）见 [rl_survey.md](rl_survey.md)。
