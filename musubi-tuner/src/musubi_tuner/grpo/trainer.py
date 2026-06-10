@@ -268,47 +268,74 @@ class GRPOTrainer:
         batch_for_dit = self._build_batch_dict(sample_parameters, param_indices, bsz, device, latents=latents)
 
         # ── 5a. Advantage-weighted loss (with grad) ─────────────────────────
-        model_pred, _ = self.base.call_dit(
-            self.args,
-            self.accelerator,
-            self.transformer,
-            latents,
-            batch_for_dit,
-            noise,
-            noisy,
-            t,
-            self.network_dtype,
-        )
+        # Optionally process in micro-batches (phase2_chunk_size) to reduce
+        # peak activation memory when group_size is large.
+        chunk = self.config.phase2_chunk_size if self.config.phase2_chunk_size > 0 else bsz
 
-        loss_per_elem = torch.nn.functional.mse_loss(
-            model_pred.to(self.network_dtype),
-            target.to(self.network_dtype),
-            reduction="none",
-        )
-        loss_per_sample = loss_per_elem.mean(dim=list(range(1, loss_per_elem.ndim)))  # [B]
-        adv_term = (advantages * loss_per_sample).mean()
+        def _slice_batch(bd: dict, s: slice) -> dict:
+            out: dict = {}
+            for k, v in bd.items():
+                if isinstance(v, torch.Tensor):
+                    out[k] = v[s]
+                elif isinstance(v, list):
+                    out[k] = v[s]
+                else:
+                    out[k] = v
+            return out
+
+        loss_chunks: list[torch.Tensor] = []
+        for start in range(0, bsz, chunk):
+            end = min(start + chunk, bsz)
+            sl = slice(start, end)
+
+            pred_chunk, _ = self.base.call_dit(
+                self.args,
+                self.accelerator,
+                self.transformer,
+                latents[sl],
+                _slice_batch(batch_for_dit, sl),
+                noise[sl],
+                noisy[sl],
+                t[sl],
+                self.network_dtype,
+            )
+            elem = torch.nn.functional.mse_loss(
+                pred_chunk.to(self.network_dtype),
+                target[sl].to(self.network_dtype),
+                reduction="none",
+            )
+            per_sample = elem.mean(dim=list(range(1, elem.ndim)))  # [chunk]
+            adv_w = (advantages[sl] * per_sample).sum()  # weighted sum in chunk
+            loss_chunks.append(adv_w)
+
+        adv_term = torch.stack(loss_chunks).sum() / bsz
 
         # ── 5b. KL penalty (no grad on ref) ────────────────────────────────
         kl_loss = torch.tensor(0.0, device=device)
         if self.config.kl_coeff > 0:
-            with torch.no_grad():
-                ref_pred, _ = self.base.call_dit(
-                    self.args,
-                    self.accelerator,
-                    self.ref_transformer,
-                    latents,
-                    batch_for_dit,
-                    noise,
-                    noisy,
-                    t,
-                    self.network_dtype,
+            kl_sum = torch.tensor(0.0, device=device)
+            for start in range(0, bsz, chunk):
+                end = min(start + chunk, bsz)
+                sl = slice(start, end)
+                # Re-forward trainable model for this chunk (with grad for total_loss)
+                pred_chunk_train, _ = self.base.call_dit(
+                    self.args, self.accelerator, self.transformer,
+                    latents[sl], _slice_batch(batch_for_dit, sl),
+                    noise[sl], noisy[sl], t[sl], self.network_dtype,
                 )
-            kl_elem = torch.nn.functional.mse_loss(
-                model_pred.to(self.network_dtype),
-                ref_pred.detach().to(self.network_dtype),
-                reduction="none",
-            )
-            kl_loss = kl_elem.mean() * self.config.kl_coeff
+                with torch.no_grad():
+                    ref_chunk, _ = self.base.call_dit(
+                        self.args, self.accelerator, self.ref_transformer,
+                        latents[sl], _slice_batch(batch_for_dit, sl),
+                        noise[sl], noisy[sl], t[sl], self.network_dtype,
+                    )
+                kl_elem = torch.nn.functional.mse_loss(
+                    pred_chunk_train.to(self.network_dtype),
+                    ref_chunk.detach().to(self.network_dtype),
+                    reduction="none",
+                )
+                kl_sum = kl_sum + kl_elem.mean() * (end - start)
+            kl_loss = kl_sum / bsz * self.config.kl_coeff
 
         total_loss = adv_term + kl_loss
         log["loss/advantage_weighted"] = adv_term.item()

@@ -39,6 +39,9 @@ class GRPOConfig:
     # Loss
     kl_coeff: float = 0.01
     clip_eps: float = 0.0  # 0 means disabled
+    # Phase 2 micro-batch size: split [group_size] images into chunks to save activation memory.
+    # None = process all at once. Set to 1 or 2 when group_size causes OOM in call_dit.
+    phase2_chunk_size: int = 0  # 0 means process all at once
 
     # Rewards
     rewards: list[RewardConfig] = field(default_factory=list)
@@ -65,6 +68,7 @@ class GRPOConfig:
             discrete_flow_shift=float(grpo.get("discrete_flow_shift", 14.5)),
             kl_coeff=float(grpo.get("kl_coeff", 0.01)),
             clip_eps=float(grpo.get("clip_eps", 0.0)),
+            phase2_chunk_size=int(grpo.get("phase2_chunk_size", 0)),
             rewards=reward_list,
             architecture=str(grpo.get("architecture", "hv")),
         )
