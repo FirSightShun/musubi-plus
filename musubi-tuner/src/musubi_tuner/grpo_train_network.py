@@ -290,8 +290,9 @@ def _grpo_loop(base_trainer, args, grpo_config, pre_args):
         network_dtype=network_dtype,
     )
 
-    # Move ref transformer to same device
-    grpo_trainer.ref_transformer.to(device, dtype=dit_dtype)
+    # Move ref transformer to same device (only if KL penalty is enabled)
+    if grpo_trainer.ref_transformer is not None:
+        grpo_trainer.ref_transformer.to(device, dtype=dit_dtype)
 
     accelerator.print(f"Starting GRPO training: {max_steps} steps, group_size={grpo_config.group_size}")
     accelerator.print(f"Rewards: {[(n, w) for n, _r, w in grpo_trainer._named_rewards]}")

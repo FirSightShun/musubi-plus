@@ -61,7 +61,8 @@ class GRPOTrainer:
         self.network_dtype = network_dtype
 
         # Freeze a snapshot of the transformer as reference policy for KL.
-        self.ref_transformer = self._build_ref(transformer)
+        # Only create if kl_coeff > 0 — deepcopy of 39 GB+ transformers causes OOM otherwise.
+        self.ref_transformer = self._build_ref(transformer) if config.kl_coeff > 0 else None
 
         # Build reward instances: list of (BaseReward, weight)
         self._reward_list: list[tuple[BaseReward, float]] = build_rewards(config.rewards)
