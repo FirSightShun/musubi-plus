@@ -50,6 +50,7 @@ architecture        = "qwen_image"
 group_size          = 8
 num_inference_steps = 20
 kl_coeff            = 0.01
+phase2_chunk_size   = 2   # group_size ≥ 4 + 高分辨率时防 Phase 2 OOM
 
 [[grpo.reward]]
 name   = "hps_v2"

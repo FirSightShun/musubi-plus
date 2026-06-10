@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 musubi-plus extends [musubi-tuner](https://github.com/kohya-ss/musubi-tuner) with RL-based training improvements for image/video generation models. Two features are being built:
 
 1. **Off-Policy Sample-Weight** (complete) — offline per-sample weighted loss via `sample_weights.json`
-2. **GRPO** (in progress) — online policy gradient RL training loop
+2. **GRPO** (complete) — online policy gradient RL training loop
 
 All actual training code lives in `musubi-tuner/`. The repo root holds docs and this framework layer.
 
@@ -113,6 +113,9 @@ Key design choices:
 - Phase 1 (no_grad): `base_trainer.do_inference()` → PIL images → reward scoring → MO-GRPO advantages.
 - Phase 2 (with_grad): VAE re-encode → `base_trainer.call_dit()` → advantage-weighted MSE + KL penalty.
 - Each reward is normalised independently within the group before aggregating (prevents high-variance rewards dominating).
+- **`phase2_chunk_size`** (GRPOConfig): splits the Phase 2 DiT forward into micro-batches to reduce peak activation memory. Set to 2 when `group_size=4` at 512×512 causes OOM.
+- **vl_embed CPU offload**: after `process_sample_prompts`, all embed tensors are moved to CPU so that 500 qwen_image prompts (each with visual tokens) don't exhaust GPU memory. `_build_batch_dict` moves them back to device per-step.
+- **Reward offload**: `BaseReward.offload()` is called after each reward's `score()` to move reward models back to CPU before Phase 2.
 
 See `doc/grpo_method.md` for the full design document.
 

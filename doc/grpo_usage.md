@@ -322,6 +322,20 @@ clip_eps = 0.2   # 标准 PPO 值（实验性）
 
 ---
 
+#### `phase2_chunk_size`
+
+- **类型**：int
+- **默认值**：`0`（0 表示整个 batch 一次性处理）
+- **说明**：Phase 2（带梯度的 DiT 前向传播）的微批次大小。将 `group_size` 张图像分割为多个 chunk 依次处理，降低峰值激活显存。对于 `group_size=4` 且分辨率 512×512 时容易 OOM 的场景，设为 `2` 可将 Phase 2 显存峰值控制在 `group_size=2` 的水平，而不影响最终梯度（各 chunk 的 loss 累加后等价于整批次）。
+
+```toml
+phase2_chunk_size = 0   # 整批处理（默认，显存充裕时）
+phase2_chunk_size = 2   # group_size=4 时防止 Phase 2 OOM（推荐）
+phase2_chunk_size = 1   # 最大节省（最慢）
+```
+
+---
+
 ### 4.3 奖励配置
 
 `[[grpo.reward]]` 是可重复的数组块，每块定义一个奖励函数。
@@ -1166,6 +1180,7 @@ guidance_scale      = 1.0
 discrete_flow_shift = 2.2
 kl_coeff            = 0.01
 clip_eps            = 0.0
+phase2_chunk_size   = 2   # group_size=8, 512×512 时防 Phase 2 OOM
 
 [[grpo.reward]]
 name   = "hps_v2"
@@ -1315,6 +1330,10 @@ output/
 | 标准训练 | FP8 | 8 | 512×512 | ~32 GB |
 | 大批量 | bf16 | 8 | 512×512 | ~60 GB |
 
+**qwen_image_edit 大规模 prompt 集的额外显存说明**：
+
+`qwen_image` 的 `vl_embed`（VL 嵌入）包含控制图像的视觉 token，每个 embed 占用 10~70 MB（取决于控制图分辨率），500 条 prompt 可能累积 20~35 GB。框架在 `process_sample_prompts` 结束后自动将所有 embed 从 GPU 卸载到 CPU，每步训练时按需加载当前 batch，不会持续占用 GPU 内存。如果 prompt 数量 ≤ 100 且显存充裕，此卸载开销可忽略。
+
 **每步耗时估算**（A100 80GB，qwen_image，256×256）：
 
 | group_size | num_inference_steps | 每步耗时 |
@@ -1407,8 +1426,11 @@ find . -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null
 按优先级依次尝试：
 
 1. `--fp8_base`（DiT 显存减半）
-2. 减小 `group_size` 为 2
-3. 减小 `width = 256, height = 256`
-4. `--gradient_checkpointing`
-5. `--blocks_to_swap 20 --use_pinned_memory_for_block_swap`
-6. `--optimizer_type AdamW8bit`（优化器状态显存减半）
+2. 设置 `phase2_chunk_size = 2`（将 Phase 2 batch 切分为微批次，激活显存减半）
+3. 减小 `group_size` 为 2
+4. 减小 `width = 256, height = 256`
+5. `--gradient_checkpointing`
+6. `--blocks_to_swap 20 --use_pinned_memory_for_block_swap`
+7. `--optimizer_type AdamW8bit`（优化器状态显存减半）
+
+**Phase 2 OOM（启用 `phase2_chunk_size` 后仍然 OOM）**：若 prompt 数量较多（≥ 200，尤其是 qwen_image_edit 的控制图分辨率较高时），`vl_embed` 可能在文本编码阶段占用大量 GPU 显存。框架会自动将 embed 卸载至 CPU；如 OOM 仍发生，检查日志确认是否在 `process_sample_prompts` 阶段 OOM，而非 Phase 2。
