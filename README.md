@@ -20,6 +20,8 @@ musubi-plus:        loss = (loss * sample_weight).mean()
 
 **优势：** 零磁盘膨胀、浮点精度权重、训练速度不变、改 JSON 即可切换策略。
 
+> 注意：当前仅支持 `ImageDataset`（图像任务），VideoDataset 如需支持需自行扩展 `dataset/image_video_dataset.py`。
+
 使用方法：
 
 ```bash
@@ -51,7 +53,6 @@ architecture        = "qwen_image"
 group_size          = 8
 num_inference_steps = 20
 kl_coeff            = 0.01
-phase2_chunk_size   = 2   # group_size ≥ 4 + 高分辨率时防 Phase 2 OOM
 
 [[grpo.reward]]
 name   = "hps_v2"

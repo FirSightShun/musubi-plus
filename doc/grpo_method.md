@@ -1,356 +1,477 @@
-# GRPO 训练框架：musubi-plus 扩展方案
+# GRPO 方法：musubi-tuner 在线 RL 训练框架
 
-**2026-06-09**
+**2026-06-10**
 
 ---
 
 ## 1. 问题定义
 
-### 1.1 Off-Policy 方案的局限
+### 1.1 Off-Policy 方案的根本局限
 
-Off-Policy Sample-Weight 方案（已实现）建立了一条清晰的路径：**离线评估样本质量 → 训练时加权 loss**。它的根本局限在于，权重是静态的——它能引导模型学哪些样本，但不能主动要求模型生成"更好"的内容。
+Off-Policy Sample-Weight 方案（已实现）确立了一个有效的基本原则：对不同质量的样本赋予不同的损失权重。它的问题是**权重在训练前就固定了**——它能引导模型更专注于哪类样本，但无法主动要求模型生成"更好"的内容。
 
-更进一步的问题是：**如何让模型在训练中持续朝"人类期望的方向"进化**？这需要：
+更重要的是，Off-Policy 方案依赖真实样本，而真实样本是有限的：训练集里的样本数量固定，质量边界固定。如果训练目标是让模型生成质量突破训练集上界的内容，Off-Policy 方案就到了它的边界。
 
-1. 在训练中在线生成内容
-2. 用奖励信号评估生成质量
-3. 将奖励反馈直接塑造模型参数
+### 1.2 在线 RL 的核心能力
 
-这是强化学习的经典设定，而 GRPO（Group Relative Policy Optimization）是目前最适配扩散/流模型的 RL 变体。
+GRPO（Group Relative Policy Optimization）的根本思路不同：
 
-### 1.2 直接套用 RL 的挑战
+```
+Off-Policy:  评估已有样本的难度 → 权重 → 影响学习
+Online RL:   模型主动生成候选 → 奖励 → 优势 → 影响生成方向
+```
+
+区别在于，在线 RL 让模型在训练中不断探索，奖励信号直接塑造生成倾向，理论上能突破训练集的质量上限。
+
+### 1.3 Flow Matching 模型的特殊挑战
+
+将 RL 套到 Flow Matching 模型上有几个非显然的困难：
 
 | 挑战 | 说明 |
 |---|---|
-| **连续动作空间** | 扩散模型的"动作"是每步预测的连续速度场，不是离散 token |
-| **长链依赖** | 一次生成 = 数十步去噪，每步都影响最终结果 |
-| **Reward Hacking** | 单一奖励模型容易被过度拟合，偏离真实质量 |
-| **多目标冲突** | 不同奖励（美学 vs 文本对齐 vs 色彩保真）量纲不同，直接相加会让高方差 reward 主导 |
+| **连续动作空间** | 模型每步输出的是连续速度场，不是离散 token，无法直接套 PPO 策略比 |
+| **长步骤依赖** | 一次生成 = T 步去噪，每步输出都影响最终图像，但奖励只在终点计算 |
+| **Reward Hacking** | 单一奖励模型极易被过拟合：模型会学到奖励模型的盲点而不是真实质量提升 |
+| **量纲不齐** | 不同奖励（HPSv2 值域 ≈ 0.2，CLIP ≈ 0.3，ΔE00 ≈ -10）直接相加，高方差奖励劫持训练 |
 
-### 1.3 设计目标
+### 1.4 设计目标
 
-- **Flow Matching 原生**：损失函数直接在速度场空间计算，不引入近似
-- **多奖励，防 Hacking**：每个 reward 独立归一化后再聚合，高方差 reward 不能主导优势函数
-- **与现有框架解耦**：不修改任何现有文件，作为独立模块插入
-- **架构无关**：支持 musubi-tuner 所有架构（hv、wan、fpack、flux、qwen_image 等）
-- **Reward 可配置**：深度模型 / 规则 / 任意指标均可注册为 reward，TOML 声明使用哪些
+- **Flow Matching 原生**：损失直接在速度场空间计算，不引入代理近似
+- **多奖励防 Hacking**：各奖励先组内归一化，再加权聚合，权重真实反映人的偏好比例
+- **与现有框架完全解耦**：不修改任何现有训练文件，独立模块插入
+- **架构无关**：通过接口代理支持所有 musubi-tuner 架构
 
 ---
 
-## 2. 方案设计
+## 2. 整体设计
 
-### 2.1 核心思路
-
-Off-Policy Sample-Weight 与 GRPO 在数学上是同一结构：
-
-```
-Off-Policy:   loss = w_offline * ||v_θ(x_t) - v*||^2     w 来自离线 JSON
-GRPO:         loss = A_online  * ||v_θ(x_t) - v*||^2     A 来自在线采样 + reward
-```
-
-区别只是**权重的来源**：离线静态 vs 在线动态。GRPO 是 Off-Policy Sample-Weight 的在线泛化。
-
-### 2.2 训练流水线
+### 2.1 两阶段流水线
 
 ![GRPO Pipeline](grpo_pipeline.svg)
 
-> 流水线分两个阶段：**①~③ no_grad**（在线采样 + reward 打分）生成优势信号；**④~⑤ with grad**（优势加权 loss + 反向传播）更新模型。
-
-### 2.3 Group 采样与 GRPO 优势
-
-GRPO 的"group"是：对同一条 prompt，用当前策略采样 G 张图像。奖励的基准是组内均值，而非绝对分数：
+每个训练 step 分为严格的两个阶段：
 
 ```
-advantage_i = reward_i − mean({reward_1, ..., reward_G})
+Phase 1（no_grad）
+  ─────────────────────────────────────────────────────
+  for 每条 prompt × G 次:
+    do_inference() → 生成图像 PIL               # 复用架构原有推理
+  
+  for 每个 reward:
+    reward.score(images, prompts) → [B·G]       # 懒加载，score 完放回 CPU
+  
+  compute_group_advantages(scores, weights, G)   # 组内归一化
+  ─────────────────────────────────────────────────────
+  结果：advantages [B·G]，不携带梯度
+
+Phase 2（with_grad）
+  ─────────────────────────────────────────────────────
+  vae.encode(images) → latents [B,C,F,H,W]       # 重新编码为训练 latent
+  scale_shift_latents(latents)                    # 架构相关归一化
+  
+  t ~ Uniform[0,1];  x_t = (1-t)·x₀ + t·ε
+  v_target = ε − x₀
+  
+  call_dit(transformer, x_t, t, batch) → v_θ     # 前向传播，携带梯度
+  call_dit(ref_transformer, x_t, t, batch) → v_ref  # 参考策略，no_grad
+  
+  L = mean( A · ||v_θ − v_target||² ) + β · mean( ||v_θ − v_ref||² )
+  ─────────────────────────────────────────────────────
+  结果：scalar loss，携带梯度，可直接 backward()
 ```
 
-这使得不同 prompt 的难度差异自动被消除——容易的 prompt 和困难的 prompt 在同一优化目标下。
+### 2.2 Group 采样与优势计算
 
-### 2.4 MO-GRPO 多奖励归一化
-
-多个奖励直接相加的问题：高方差 reward（如 OCR 分数）会在归一化后产生更大的梯度，实际上劫持了训练。MO-GRPO 的解法是**先归一化，再聚合**：
+对同一条 prompt 采样 G 张图像，以**组内均值**作为奖励基准：
 
 ```
-r_norm_k(i) = (r_k(i) - mean_k) / (std_k + eps)   # 每个 reward 组内独立归一化
-A(i)        = sum_k( w_k * r_norm_k(i) )            # 归一化后再加权求和
+reward_i → advantage_i = reward_i − mean_group(reward)
 ```
 
-其中 `mean_k`、`std_k` 在同一 group 的 G 个样本上计算。每个 reward 在聚合前的贡献量级相同，权重 w_k 真实反映人的偏好比例，而不受 reward 值域影响。
+这个设计的关键特性是**自适应难度消除**：对容易的 prompt，G 张图像质量都高，均值也高，优势仍是有意义的相对分；对难的 prompt，G 张图像质量都低，但高于均值的样本仍会得到正优势。不同 prompt 之间的难度差异不会混入梯度信号。
 
-### 2.5 Flow Matching GRPO Loss
+### 2.3 MO-GRPO 多奖励归一化（核心设计）
 
-对于 Flow Matching 模型（musubi-tuner 全系架构），前向过程是：
-
-```
-x_t = (1 − t) · x_0 + t · ε,  ε ~ N(0, I)
-v_target = ε − x_0
-```
-
-标准训练 loss 为 `L_FM = ||v_θ(x_t, t, c) - v_target||^2`。GRPO 在此基础上乘以优势并加 KL 惩罚：
+多奖励直接加权求和的问题：
 
 ```
-L_GRPO = E[i,t][ A(i) * ||v_θ(x_t(i), t, c) - v_target(i)||^2 ]
-       + beta  * E[t] [ ||v_θ(x_t,    t, c) - v_ref(x_t, t, c)||^2 ]
+A = Σ_k w_k · r_k
+
+# 若 r₁ ∈ [0.15, 0.25]（CLIP），r₂ ∈ [-15, -2]（ΔE00）
+# r₂ 的绝对方差远大于 r₁，梯度由 r₂ 主导，w 权重失去意义
 ```
 
-- `A(i)` 为 MO-GRPO 优势（第 2.4 节），正值 = 鼓励，负值 = 抑制
-- 第二项为 KL 惩罚，`v_ref` 是训练开始时冻结的参考策略，防止策略漂移过远
-- `x_t(i)` 是对采样图像加噪得到的中间状态，**不参与梯度**（在线采样阶段已 `no_grad`）
+MO-GRPO 的解法：**先在 group 内归一化，再加权聚合**：
+
+```python
+# advantage.py: compute_group_advantages()
+
+r = raw.reshape(B, G)                           # [B, G]
+mean = r.mean(dim=1, keepdim=True)              # 组内均值 [B, 1]
+std  = r.std(dim=1, keepdim=True, unbiased=False)
+r_norm = (r − mean) / (std + eps)              # 每个奖励组内标准化
+
+advantage += w_k * r_norm.reshape(B*G)         # 各奖励贡献量级相同
+```
+
+归一化后每个奖励的标准差约为 1，权重 `w_k` 直接等于该奖励在最终优势中的实际比例。
+
+### 2.4 Flow Matching GRPO Loss
+
+Flow Matching 的前向过程：
+
+```
+x_t = (1 − t) · x₀ + t · ε,    ε ~ N(0, I),    t ~ Uniform[0, 1]
+v_target = ε − x₀               # 标准 FM 速度场目标
+```
+
+标准 SFT loss：`L_FM = E[t] ||v_θ(x_t, t, c) − v_target||²`
+
+GRPO loss 在此基础上加入优势权重和 KL 惩罚：
+
+```
+L_GRPO = E[i,t] [ A(i) · ||v_θ(xₜ(i), t, c) − v_target(i)||² ]
+       + β      · E[t]  [ ||v_θ(xₜ, t, c) − v_ref(xₜ, t, c)||² ]
+```
+
+- `A(i)` > 0：该样本的优势为正，鼓励 v_θ 靠近对应的速度场目标
+- `A(i)` < 0：该样本优势为负，惩罚 v_θ 朝该方向移动
+- 第二项 KL 惩罚：`v_ref` 是训练开始时冻结的参考策略快照，防止策略漂移过远
+
+**关键注意**：`x₀` 是从已生成图像重新编码得到的 latent（不是训练集样本），不携带梯度；`x_t` 是对 `x₀` 加噪后的中间状态，也不携带梯度。梯度只流过 Phase 2 的 DiT 前向传播。
 
 ---
 
-## 3. Reward 系统设计
+## 3. 框架设计
 
-### 3.1 BaseReward 接口
+### 3.1 文件结构
 
-所有 reward 实现同一接口，通过注册器动态加载：
-
-```python
-class BaseReward(ABC):
-    def __init__(self, params: dict): ...
-    def load(self, device: torch.device): ...   # 懒加载模型
-
-    @abstractmethod
-    def score(
-        self,
-        images: list[Image.Image],
-        prompts: list[str],
-        **kwargs,
-    ) -> torch.Tensor:
-        """返回 [N] 张量，越高越好。"""
-        ...
-```
-
-注册方式（装饰器）：
-
-```python
-@register("hps_v2")
-class HPSv2Reward(BaseReward):
-    ...
-```
-
-TOML 中写 `name = "hps_v2"` 即可自动匹配。
-
-### 3.2 内置 Reward 列表
-
-| name | 类型 | 来源 | 输入 |
-|---|---|---|---|
-| `hps_v2` | 偏好模型 | HPSv2.1 | image + prompt |
-| `pickscore` | 偏好模型 | PickScore | image + prompt |
-| `image_reward` | 偏好模型 | ImageReward | image + prompt |
-| `clip` | 对齐指标 | CLIP ViT-H-14 | image + prompt |
-| `ocr` | 规则指标 | PaddleOCR | image + prompt（含目标文字） |
-| `vlm` | VLM 打分 | Qwen2-VL-2B | image + prompt（自定义评分指令） |
-| `delta_e00` | 规则指标 | CIEDE2000 | image + reference_image |
-
-### 3.3 ΔE00 色彩保真度 Reward
-
-ΔE00（CIEDE2000）是感知均匀色差标准，1.0 表示人眼刚好可感知的差异。实现步骤：
-
-```python
-# 1. 转换至 Lab 色彩空间
-img_lab = rgb_to_lab(generated_image)      # [H, W, 3]
-ref_lab = rgb_to_lab(reference_image)      # [H, W, 3]
-
-# 2. 逐像素计算 ΔE00（colour-science 库）
-delta_e = colour.delta_E(img_lab, ref_lab, method="CIE 2000")  # [H, W]
-
-# 3. 转为奖励（低色差 = 高奖励）
-reward = -delta_e.mean()    # 取均值后取反
-```
-
-`clip_max` 参数可截断异常大的色差值（如背景区域遮挡导致的极端值）。
-
-### 3.4 VLM Reward 配置
-
-VLM reward 通过 prompt 模板灵活定义评分维度：
-
-```toml
-[[grpo.reward]]
-name = "vlm"
-weight = 0.2
-[grpo.reward.params]
-model = "Qwen/Qwen2-VL-2B-Instruct"
-prompt_template = "请从 1-10 打分评价这张图片与描述「{prompt}」的一致性，只输出数字。"
-```
-
----
-
-## 4. 框架设计
-
-### 4.1 文件结构
-
-**新增文件，不修改任何现有文件。**
+**零侵入原则**：不修改任何现有文件，所有新逻辑在独立目录中实现。
 
 ```
 musubi-tuner/src/musubi_tuner/
-├── grpo/
+├── grpo/                              # 新增目录（不修改任何现有文件）
 │   ├── __init__.py
-│   ├── config.py              # GRPOConfig / RewardConfig（dataclass，TOML 加载）
-│   ├── trainer.py             # GRPOTrainer：主训练循环
-│   ├── advantage.py           # MO-GRPO 优势计算
-│   ├── prompt_dataset.py      # Prompt + 参考图数据集（JSONL / txt）
+│   ├── config.py                      # GRPOConfig / RewardConfig（dataclass）
+│   ├── trainer.py                     # GRPOTrainer 主体
+│   ├── advantage.py                   # MO-GRPO 优势计算
+│   ├── prompt_dataset.py              # Prompt 数据集（JSONL / txt）
 │   └── reward/
-│       ├── __init__.py
-│       ├── base.py            # BaseReward ABC + @register 装饰器
-│       ├── hps.py             # HPSv2
-│       ├── pickscore.py       # PickScore
-│       ├── image_reward.py    # ImageReward
-│       ├── clip.py            # CLIP
-│       ├── ocr.py             # PaddleOCR
-│       ├── vlm.py             # Qwen2-VL
-│       └── delta_e.py         # ΔE00
-└── grpo_train_network.py      # 入口脚本
+│       ├── base.py                    # BaseReward ABC + @register 注册器
+│       ├── clip.py                    # CLIP ViT-H-14
+│       ├── hps.py                     # HPSv2.1
+│       ├── pickscore.py               # PickScore
+│       ├── image_reward.py            # ImageReward
+│       ├── ocr.py                     # PaddleOCR 文字准确率
+│       ├── vlm.py                     # Qwen2-VL 语义评分
+│       └── delta_e.py                 # CIEDE2000 色彩保真度
+└── grpo_train_network.py              # 新增入口脚本
 ```
 
-### 4.2 GRPOTrainer 设计
+与 Off-Policy 方案的侵入性对比：
 
-`GRPOTrainer` 不继承 `NetworkTrainer`，而是**持有**它——组合优于继承：
+| 方案 | 修改现有文件 | 修改行数 |
+|---|---|---|
+| Off-Policy Sample-Weight | 3 个文件 | 约 30 行 |
+| GRPO | 0 个文件 | N/A |
+
+### 3.2 GRPOTrainer：组合而非继承
+
+最核心的架构决策是 `GRPOTrainer` **持有** `NetworkTrainer` 而非继承它：
 
 ```python
+# ❌ 继承方式（被放弃的方案）
+class GRPOTrainer(NetworkTrainer):
+    def train_step(self, ...):
+        ...
+    # 问题：NetworkTrainer 的 train() 主循环难以被覆盖，
+    #      架构特定属性会通过 self 隐式传递，
+    #      单元测试困难，多架构复用困难
+
+# ✅ 组合方式（实际实现）
 class GRPOTrainer:
-    def __init__(self, base_trainer: NetworkTrainer, config: GRPOConfig):
-        self.base   = base_trainer
-        self.ref    = self._freeze(base_trainer.transformer)  # 冻结参考策略
-        self.rewards = build_rewards(config.rewards)
-
-    def step(self, prompts: list[str]) -> torch.Tensor:
-        # Phase 1: 在线采样（no_grad）
-        with torch.no_grad():
-            images = self._rollout(prompts)                   # [B·G, H, W, 3]
-            scores = self._score(images, prompts)             # {name: [B·G]}
-            adv    = compute_advantages(scores, self.weights) # [B·G]
-
-        # Phase 2: 计算 loss（with grad）
-        return self._grpo_loss(images, adv, prompts)
-
-    def _rollout(self, prompts):
-        # 复用 base_trainer.sample_image_inference()
-        ...
-
-    def _grpo_loss(self, images, adv, prompts):
-        # 对采样图像加噪 → 预测速度场 → 优势加权 MSE + KL 惩罚
-        ...
+    def __init__(self, base_trainer: NetworkTrainer, ...):
+        self.base = base_trainer         # 持有，不继承
 ```
 
-### 4.3 架构无关性
+这个决策带来的好处：
 
-`grpo_train_network.py` 通过 `--architecture` 动态导入对应 Trainer：
+1. `GRPOTrainer` 的接口是明确的（`step()` 方法），不受任何 `NetworkTrainer` 内部变化影响
+2. 所有架构特定操作通过 `self.base.xxx()` 显式调用，调用链可读
+3. `base_trainer` 可以是任意架构的 `NetworkTrainer` 子类，GRPO 层不感知架构细节
+
+### 3.3 Reward 注册器
+
+奖励函数通过注册器与名称字符串解耦：
+
+```python
+# base.py
+_REWARD_REGISTRY: dict[str, type[BaseReward]] = {}
+
+def register(name: str):
+    def decorator(cls):
+        _REWARD_REGISTRY[name] = cls
+        return cls
+    return decorator
+
+# clip.py
+@register("clip")
+class CLIPReward(BaseReward):
+    ...
+
+# TOML 中写 name = "clip" → 自动实例化 CLIPReward
+```
+
+新增奖励只需要：新建一个文件，实现 `BaseReward.score()`，加 `@register` 装饰器。无需修改任何注册表文件或工厂函数。
+
+### 3.4 动态架构导入
+
+入口脚本通过名称字符串动态导入对应架构的 `NetworkTrainer`：
 
 ```python
 ARCH_TRAINERS = {
-    "hv":          "musubi_tuner.hv_train_network.NetworkTrainer",
-    "wan":         "musubi_tuner.wan_train_network.NetworkTrainer",
-    "qwen_image":  "musubi_tuner.qwen_image_train_network.NetworkTrainer",
-    "fpack":       "musubi_tuner.fpack_train_network.NetworkTrainer",
-    # ...
+    "hv":          "musubi_tuner.hv_train_network",
+    "wan":         "musubi_tuner.wan_train_network",
+    "qwen_image":  "musubi_tuner.qwen_image_train_network",
+    ...
 }
+
+def _import_trainer(architecture: str):
+    mod = importlib.import_module(ARCH_TRAINERS[architecture])
+    
+    # 用 inspect 找该模块中定义的 NetworkTrainer 子类
+    # 不用 getattr(mod, "NetworkTrainer") ——该名称可能指向从别处导入的基类
+    arch_classes = [
+        cls for _, cls in inspect.getmembers(mod, inspect.isclass)
+        if issubclass(cls, _BaseTrainer)
+        and cls is not _BaseTrainer
+        and cls.__module__ == mod.__name__       # 必须是本模块定义的，非导入的
+    ]
+    return arch_classes[0]
 ```
 
-模型加载（DiT、VAE、文本编码器）全部复用各架构现有的 `load_transformer()` / `load_vae()`，GRPO 层不感知架构细节。
-
-### 4.4 Prompt 数据集格式
-
-```jsonl
-{"prompt": "a red apple on a white table", "reference": "data/refs/apple_001.png"}
-{"prompt": "futuristic city at night"}
-```
-
-`reference` 字段可选，仅 `delta_e00` 等需要参考图的 reward 会用到。
+`cls.__module__ == mod.__name__` 这个过滤条件是必须的：qwen_image 模块从 `hv_train_network` 导入基类，若不过滤 `__module__`，`getmembers` 会返回基类而非 `QwenImageNetworkTrainer`。
 
 ---
 
-## 5. 配置与使用
+## 4. 关键实现
 
-### 5.1 TOML 配置示例
+### 4.1 Phase 1：在线采样（_rollout_one）
 
-```toml
-[grpo]
-architecture        = "qwen_image"
-group_size          = 8          # G：每条 prompt 采样几张
-num_inference_steps = 20         # 去噪步数
-kl_coeff            = 0.01       # KL 惩罚系数 β
-clip_eps            = 0.2        # PPO-style 梯度裁剪 ε
+```python
+# trainer.py: _rollout_one()
 
-[[grpo.reward]]
-name   = "hps_v2"
-weight = 0.25
-
-[[grpo.reward]]
-name   = "clip"
-weight = 0.25
-
-[[grpo.reward]]
-name   = "image_reward"
-weight = 0.2
-
-[[grpo.reward]]
-name   = "delta_e00"
-weight = 0.3
-[grpo.reward.params]
-reference_dir = "data/references"
-clip_max      = 10.0
+def _rollout_one(self, sample_parameter, generator):
+    transformer = self.accelerator.unwrap_model(self.transformer)
+    was_train = transformer.training
+    transformer.eval()                          # 推理时关闭 dropout
+    
+    try:
+        video = self.base.do_inference(         # 完全复用架构原有推理代码
+            self.accelerator, self.args,
+            sample_parameter,                   # 含 prompt embedding、尺寸等
+            self.vae, self.dit_dtype,
+            transformer,
+            discrete_flow_shift, steps,
+            width, height, frame_count,
+            generator,
+            do_classifier_free_guidance=False,  # GRPO 训练中关闭 CFG
+            guidance_scale=1.0,
+        )
+    finally:
+        transformer.train(was_train)            # 恢复训练状态
+        self.vae.to("cpu")                      # VAE 用完立即卸到 CPU
+    
+    return video, None                          # latents 不暴露（不需要）
 ```
 
-### 5.2 启动命令
+两个细节值得注意：
+- `do_classifier_free_guidance=False`：GRPO 训练时关闭 CFG，与 RLHF 的通常做法一致，也避免 CFG 扭曲奖励基准
+- `vae.to("cpu")`：VAE 在 `do_inference` 内会被移到 GPU，这里需要显式移回，否则 G 次推理后 VAE 和 DiT 同时占用 GPU
 
-```bash
-accelerate launch --mixed_precision bf16 \
-    src/musubi_tuner/grpo_train_network.py \
-    --grpo_config  grpo_config.toml \
-    --prompt_file  prompts.jsonl \
-    --dit          path/to/dit \
-    --vae          path/to/vae \
-    --network_module networks.lora \
-    --network_dim  32
+### 4.2 Phase 2：VAE 重编码（两种 VAE 家族）
+
+Phase 2 需要将 PIL 图像编码回 latent 进行 DiT 前向传播。musubi-tuner 支持两种 VAE 接口：
+
+```python
+# trainer.py: _encode_images_to_latents()
+
+if hasattr(self.vae, "latents_mean"):
+    # qwen_image 系 VAE（AutoencoderKLQwenImage）
+    # 使用 latents_mean / latents_std 做归一化，不用 config.scaling_factor
+    # 输入期望 [0,1] 浮点，内部处理归一化和时间维度
+    latents = self.vae.encode_pixels_to_latents(imgs_t)          # [B, C, 1, H, W]
+else:
+    # diffusers 系 VAE（AutoencoderKL 等）
+    imgs_t = imgs_t * 2.0 - 1.0          # [0,1] → [-1,1]
+    imgs_t = imgs_t.unsqueeze(2)          # [B,C,H,W] → [B,C,1,H,W]
+    latent_dist = self.vae.encode(imgs_t)
+    latents = latent_dist.latent_dist.sample()   # 或 .sample()，取决于版本
+    
+    if getattr(self.vae.config, "shift_factor", None):
+        latents = (latents - self.vae.config.shift_factor) * self.vae.config.scaling_factor
+    elif getattr(self.vae.config, "scaling_factor", None):
+        latents = latents * self.vae.config.scaling_factor
 ```
 
-大部分参数与现有训练脚本相同（`--fp8_base`、`--blocks_to_swap`、`--seed` 等均可复用）。
+VAE 家族检测用 `hasattr(vae, "latents_mean")` 而非类名检查，保证对未来新 VAE 的鲁棒性。
+
+### 4.3 Phase 2：架构无关 batch 构建（_build_batch_dict）
+
+不同架构的 `call_dit` 期望不同的 batch 键：
+
+```python
+# trainer.py: _build_batch_dict()
+
+if "vl_embed" in first_sp:
+    # qwen_image 架构
+    # vl_embed 在 process_sample_prompts 中存储为 [1, L, D]（带 batch 维）
+    # call_dit 期望 list of [L, D]，因此需要 squeeze(0)
+    vl_list = [
+        sample_parameters[idx]["vl_embed"].squeeze(0).to(device)   # [1,L,D] → [L,D]
+        for idx in param_indices
+    ]
+    batch = {"vl_embed": vl_list}
+
+else:
+    # HunyuanVideo 系架构
+    # llm_embeds / llm_mask / clipL_embeds，长度可能不同，需要 padding
+    batch = {
+        "llm":      _pad_stack([sp["llm_embeds"] for sp in ...]),
+        "llm_mask": _pad_stack([sp["llm_mask"]   for sp in ...]),
+        "clipL":    _pad_stack([sp["clipL_embeds"] for sp in ...]),
+    }
+
+# qwen_image 的 call_dit 从 batch["latents"] 读取 latent（不从参数读）
+if latents is not None:
+    batch["latents"] = latents
+```
+
+`squeeze(0)` 这个细节值得解释：`process_sample_prompts` 在编码 vl_embed 时保留了 batch 维（`[1, L, D]`），而 `call_dit` 内部用 `x.shape[0]` 作为 text sequence length。若不 squeeze，`shape[0] = 1`（batch 维），导致 txt_query 尺寸错误，attention cat 失败。
+
+### 4.4 KL 惩罚的参考策略冻结
+
+参考策略在 `__init__` 时通过 `copy.deepcopy` 创建，此后完全冻结：
+
+```python
+# trainer.py: __init__()
+
+self.ref_transformer = copy.deepcopy(transformer)
+self.ref_transformer.requires_grad_(False)
+self.ref_transformer.eval()
+```
+
+```python
+# trainer.py: _grpo_loss()
+
+if self.config.kl_coeff > 0:
+    with torch.no_grad():                           # 参考策略不参与梯度
+        ref_pred, _ = self.base.call_dit(
+            ..., self.ref_transformer, ...          # 用冻结的 ref，不是 self.transformer
+        )
+    kl_loss = F.mse_loss(
+        model_pred.detach() → model_pred,           # 当前策略
+        ref_pred.detach(),                          # 参考策略
+        reduction="none"
+    ).mean() * self.config.kl_coeff
+```
+
+MSE 在速度场空间计算 KL 是一种近似（严格的 KL 需要在高斯分布上计算），但在 Flow Matching 上已被证明实用且计算量小。
+
+### 4.5 完整 step() 流程
+
+```python
+def step(self, sample_parameters, reference_images=None):
+    G = self.config.group_size
+    
+    # ── Phase 1: 在线采样（no_grad）──────────────────────────
+    with torch.no_grad():
+        all_images, all_prompts, all_ref_images = [], [], []
+        
+        for sp in sample_parameters:
+            for _ in range(G):
+                video, _ = self._rollout_one(sp, generator)
+                all_images.append(_video_to_pil(video))
+                all_prompts.append(sp["prompt"])
+        
+        # 逐 reward 打分（懒加载模型，score 后释放）
+        scores = {}
+        for name, rw, _ in self._named_rewards:
+            rw.load(device)
+            scores[name] = rw.score(all_images, all_prompts, ...).cpu()
+        
+        # MO-GRPO 优势
+        adv = compute_group_advantages(scores, weight_map, G)    # [B*G]
+    
+    # ── Phase 2: GRPO loss（with_grad）──────────────────────
+    loss, log = self._grpo_loss(all_images, adv, sample_parameters, ...)
+    
+    return loss, log
+```
+
+`step()` 返回一个携带梯度的 scalar tensor，调用方直接 `accelerator.backward(loss)` 即可，与标准训练循环完全一致。
 
 ---
 
-## 6. 防 Reward Hacking 策略
+## 5. 与 Off-Policy Sample-Weight 的统一视角
 
-| 机制 | 作用 | 实现位置 |
-|---|---|---|
-| MO-GRPO 归一化 | 防高方差 reward 劫持优势函数 | `advantage.py` |
-| Reward 截断 | 消除极端打分噪声（如遮挡导致的 ΔE00 异常值） | `BaseReward.score()` post-processing |
-| KL 惩罚 | 防策略偏离参考模型过远，保留预训练能力 | `trainer._grpo_loss()` 第二项 |
-| PPO clipping（可选） | 限制单步策略更新幅度 | `trainer._grpo_loss()`，由 `clip_eps` 控制 |
-| 多 reward 集成 | 单一 reward 被 hack 时，其他 reward 提供纠正信号 | `advantage.py` 加权聚合 |
+两个方法在数学上是**同一结构**：
 
----
+```
+Off-Policy:   loss_i = w_offline(i)  · ||v_θ(x_t) − v_target||²
+GRPO:         loss_i = A_online(i)   · ||v_θ(x_t) − v_target||²
+```
 
-## 7. 与 Off-Policy Sample-Weight 的对比
+唯一的区别是损失权重的来源：
 
 | 维度 | Off-Policy Sample-Weight | GRPO |
 |---|---|---|
-| 权重来源 | 训练前离线计算 | 训练中在线采样 |
-| 反馈延迟 | 静态（手动重跑评估） | 即时（每 step 更新） |
-| 数据来源 | 训练集中的真实样本 | 模型当前策略采样的合成样本 |
-| 奖励维度 | 单一难度指标 | 多维 reward 加权聚合 |
-| 计算开销 | 极低（一次乘法） | 高（G × 完整去噪链 + reward 推理） |
-| 适用阶段 | 监督微调（SFT）增强 | 对齐训练（RL fine-tuning） |
+| 权重来源 | 训练前离线计算 | 训练中在线生成 + 奖励打分 |
+| 训练样本 | 数据集中的真实样本 | 当前策略生成的合成样本 |
+| 反馈延迟 | 静态（手动更新 JSON） | 即时（每 step 更新） |
+| 能否突破训练集质量上限 | 否 | 是 |
+| 计算开销 | 极低（一次乘法） | 高（G × 完整推理 + 奖励推理） |
 | 实现复杂度 | 低（3 文件 8 处改动） | 高（独立模块 ~12 个文件） |
+| 适用阶段 | SFT 增强 | 对齐训练（RL fine-tuning） |
 
-两者**正交**，可以同时开启：用 Off-Policy 权重做课程采样，再用 GRPO 做在线对齐。
-
----
-
-## 8. 注意事项
-
-1. **计算开销**：每个训练 step 需要 G 次完整推理（默认 G=8，20 步去噪），显存和时间开销远高于 SFT。建议先用小 `group_size` 和少 `num_inference_steps` 验证流程。
-
-2. **Reward 冷启动**：部分 reward 模型（VLM、HPSv2）在第一次调用时需要加载大模型，建议在训练开始前 warmup。
-
-3. **参考策略更新**：`v_ref` 当前为训练开始时的快照（固定）。如训练轮数很长，可考虑定期软更新（Polyak averaging）。
-
-4. **ΔE00 的参考图对齐**：参考图需与 prompt 严格对应（通过文件名匹配），`prompt_dataset.py` 负责此映射，参考图缺失时该样本的 `delta_e00` 奖励自动降权为 0。
-
-5. **多卡同步**：每个进程独立采样并打分，advantages 在 `accelerator.gather()` 后跨卡归一化，保证 group 统计量在全局 batch 上计算。
+两者**正交**，可以同时使用：用 Off-Policy 权重做课程采样，同时用 GRPO 做在线对齐。
 
 ---
 
-## 9. 延伸阅读
+## 6. 注意事项
 
-相关算法调研（DanceGRPO、Flow-GRPO、Adv-GRPO、MO-GRPO、PREF-GRPO、图像编辑专用 Reward Model 训练方案）见 [rl_survey.md](rl_survey.md)。
+### 6.1 group_size 的下界
+
+`compute_group_advantages` 在 group 内计算标准差。当 `group_size = 1` 时，std = 0，所有 advantage = 0，梯度消失。实践中 `group_size ≥ 2`，推荐 4~8。
+
+### 6.2 奖励方差与 advantage 的关系
+
+若 group 内所有图像的奖励得分几乎相同（如生成早期模型输出全是噪声，CLIP 分全部极低），`std ≈ 0`，归一化后的 advantage 趋向 0，训练停滞。此时应检查推理步数是否太少（`num_inference_steps < 5` 时生成图像可能质量无差异），或暂时降低 `kl_coeff` 让策略先有足够自由度探索。
+
+### 6.3 参考策略更新
+
+当前实现中参考策略在整个训练过程中保持初始快照不变。若训练轮数较长（> 500 step），策略漂移可能导致 KL 项持续增大而不收敛。可以考虑每隔 N 步用 Polyak 平均更新参考策略：
+
+```python
+# 未内置，需要手动添加
+tau = 0.005
+for p_ref, p_cur in zip(ref_transformer.parameters(), transformer.parameters()):
+    p_ref.data.mul_(1 - tau).add_(tau * p_cur.data)
+```
+
+### 6.4 VAE 显存管理
+
+每次 Phase 1 推理后 VAE 会被主动移回 CPU（`vae.to("cpu")`）。Phase 2 编码时再次移到 GPU，编码完成后再移回 CPU。这会有约 1~2 秒的 host-device 传输开销，但能避免 DiT（39GB+）和 VAE 同时占用 GPU。若显存充足，可去掉这个来回移动。
+
+### 6.5 架构特定注意事项
+
+**qwen_image**：
+
+- 必须传 `--model_version`（如 `edit-2511`），否则 `handle_model_specific_args` 无法推断 `is_edit`/`is_layered`
+- 不支持 `attn_mode = "sdpa"`，默认改用 `"torch"`；需要加速时用 `--flash_attn`
+- 文本编码器参数名是 `--text_encoder`，不是 `--text_encoder1`
+
+**HunyuanVideo / Wan / FramePack**：
+
+- 需要两个文本编码器（`--text_encoder1` + `--text_encoder2`）或一个（`--text_encoder1`）
+- `discrete_flow_shift` 对这些架构取 `14.5`（HunyuanVideo）或 `3.0`（Wan）

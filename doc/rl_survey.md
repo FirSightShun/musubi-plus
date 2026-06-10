@@ -3,6 +3,8 @@
 > 调研时间：2026-05-28 ~ 2026-05-29  
 > 覆盖方向：GRPO 变体算法 · 开源 Reward Model 生态 · 多 Reward 防 Hacking 方法 · 图像编辑专用 Reward Model 训练
 
+**musubi-plus 的实现选择：** 本项目采用了第 3 节中的 **MO-GRPO** 策略（组内先归一化后聚合）作为核心防 Hacking 机制，配合 **KL 惩罚**约束策略偏离。本文档是选型前的背景调研，供后续引入 PREF-GRPO 或 Adv-GRPO 等更强方案时参考。实现细节见 [`grpo_method.md`](grpo_method.md) §2.3。
+
 ---
 
 ## 目录

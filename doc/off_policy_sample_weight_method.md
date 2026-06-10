@@ -89,7 +89,7 @@
 ### 2.4 训练时消费
 
 ```bash
-accelerate launch hv_train_network.py \
+accelerate launch src/musubi_tuner/hv_train_network.py \
     --sample_weight_file sample_weights.json \
     --sample_weight_multiplier 1.0 \
     ...
@@ -305,7 +305,6 @@ parser.add_argument(
 | 图像编辑 | CLIP 语义一致性 | 编辑指令 vs 编辑结果的 CLIP 相似度 |
 | 超分辨率 | HR-LR 重建误差 | 降采样后超分，对比原始 HR |
 | 风格迁移 | 风格损失 + 内容损失 | 特征空间的 Gram 矩阵差异 |
-| 文本生成 | BLEU / ROUGE / 困惑度 | 生成结果与参考文本的差异 |
 | 任意任务 | 人工标注难度等级 | 标注员打分 → 映射为权重 |
 
 ### 4.3 权重生成脚本模板

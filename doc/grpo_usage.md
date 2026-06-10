@@ -1,6 +1,6 @@
 # GRPO 训练使用指南
 
-本文档是 musubi-plus GRPO 功能的完整参数参考。理论背景见 [GRPO-Method.md](GRPO-Method.md)。
+本文档是 musubi-plus GRPO 功能的完整参数参考。理论背景见 [grpo_method.md](grpo_method.md)。
 
 ---
 
@@ -326,11 +326,11 @@ clip_eps = 0.2   # 标准 PPO 值（实验性）
 
 - **类型**：int
 - **默认值**：`0`（0 表示整个 batch 一次性处理）
-- **说明**：Phase 2（带梯度的 DiT 前向传播）的微批次大小。将 `group_size` 张图像分割为多个 chunk 依次处理，降低峰值激活显存。对于 `group_size=4` 且分辨率 512×512 时容易 OOM 的场景，设为 `2` 可将 Phase 2 显存峰值控制在 `group_size=2` 的水平，而不影响最终梯度（各 chunk 的 loss 累加后等价于整批次）。
+- **说明**：Phase 2（带梯度的 DiT 前向传播）的微批次大小。将 `group_size` 张图像分割为多个 chunk 依次处理，降低峰值激活显存。对于 `group_size ≥ 4` 且分辨率 512×512 时容易 OOM 的场景，设为 `2` 可将 Phase 2 显存峰值控制在 `group_size=2` 的水平，而不影响最终梯度（各 chunk 的 loss 累加后等价于整批次）。
 
 ```toml
 phase2_chunk_size = 0   # 整批处理（默认，显存充裕时）
-phase2_chunk_size = 2   # group_size=4 时防止 Phase 2 OOM（推荐）
+phase2_chunk_size = 2   # group_size ≥ 4 时防 Phase 2 OOM（推荐）
 phase2_chunk_size = 1   # 最大节省（最慢）
 ```
 
@@ -666,6 +666,8 @@ clip_max = 10.0
 | `wan` | `--text_encoder1` | UMT5-XXL |
 | `fpack` | `--text_encoder1` | LLaVA-LLaMA3 |
 | `flux_2`, `flux_kontext` | `--text_encoder1` + `--text_encoder2` | CLIP-L + T5-XXL |
+| `kandinsky5` | `--text_encoder1` | |
+| `zimage` | `--text_encoder1` | |
 
 ```bash
 # qwen_image
@@ -745,7 +747,7 @@ clip_max = 10.0
 ```bash
 --network_alpha 16   # alpha=dim（缩放比例=1.0，较强）
 --network_alpha 8    # alpha=dim/2（缩放比例=0.5，推荐）
---network_alpha 1    # alpha=1/dim（极弱，训练初期几乎不改变模型）
+--network_alpha 1    # 缩放比例=1/dim（极弱，训练初期几乎不改变模型）
 ```
 
 ---
@@ -796,12 +798,12 @@ clip_max = 10.0
 
 - **类型**：float
 - **默认值**：`2e-6`
-- **说明**：AdamW 优化器学习率。GRPO 训练中 LoRA 参数每步更新幅度较大（因为 advantage 会放大有效 loss），学习率可以比 SFT 训练更小。
+- **说明**：AdamW 优化器学习率。GRPO 训练中 advantage 会对有效 loss 进行缩放，建议从较小值开始尝试。
 
 ```bash
---learning_rate 1e-5   # 较大（早期探索阶段）
---learning_rate 1e-4   # 中等（常用值）
---learning_rate 5e-5   # 保守（稳定但收敛较慢）
+--learning_rate 1e-4   # 较大（早期探索或快速验证）
+--learning_rate 5e-5   # 标准（推荐起点）
+--learning_rate 1e-5   # 保守（训练不稳定时）
 ```
 
 ---
@@ -1180,7 +1182,7 @@ guidance_scale      = 1.0
 discrete_flow_shift = 2.2
 kl_coeff            = 0.01
 clip_eps            = 0.0
-phase2_chunk_size   = 2   # group_size=8, 512×512 时防 Phase 2 OOM
+phase2_chunk_size   = 2   # group_size ≥ 4, 512×512 时防 Phase 2 OOM
 
 [[grpo.reward]]
 name   = "hps_v2"
@@ -1295,10 +1297,10 @@ weight = 1.0
 
 ```
 output/
-├── grpo_run_000100.safetensors   # save_every_n_steps 中间检查点
-├── grpo_run_000200.safetensors
+├── grpo_qwen_000200.safetensors   # save_every_n_steps 中间检查点
+├── grpo_qwen_000400.safetensors
 ├── ...
-└── grpo_run_final.safetensors    # 训练结束后自动保存
+└── grpo_qwen_final.safetensors    # 训练结束后自动保存
 ```
 
 ### TensorBoard 日志指标
@@ -1417,7 +1419,13 @@ find . -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null
 
 ### 奖励模型每步都重新加载，速度很慢
 
-当前实现中奖励模型在 Phase 1 结束后会卸回 CPU（`rw.load(device)` 是懒加载，但 CLIP 等重模型每步重新移到 GPU 有开销）。如果只使用一种奖励且显存充裕，可以预先将奖励模型保留在 GPU：在奖励模块的 `load()` 方法中去掉 `self.vae.to("cpu")` 风格的卸载逻辑（需要修改对应奖励文件）。
+当前实现在 Phase 1 结束后会将奖励模型卸回 CPU（`BaseReward.offload()`），以便 Phase 2 使用 GPU。如果显存充裕，只需在对应奖励文件中覆写 `offload()` 方法使其变为空操作，即可让奖励模型常驻 GPU：
+
+```python
+# 例：reward/clip.py 或任意 BaseReward 子类
+def offload(self) -> None:
+    pass  # 不卸载，常驻 GPU
+```
 
 ---
 
