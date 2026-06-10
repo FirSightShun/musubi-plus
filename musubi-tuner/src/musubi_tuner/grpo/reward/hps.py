@@ -37,5 +37,8 @@ class HPSv2Reward(BaseReward):
         scores = []
         for img, prompt in zip(images, prompts):
             s = self._hpsv2.score(img, prompt, hps_version="v2.1")
-            scores.append(float(s) if not isinstance(s, float) else s)
+            # hpsv2.score returns a list (e.g. [np.float32(0.28)]) — extract scalar
+            if isinstance(s, (list, tuple)):
+                s = s[0]
+            scores.append(float(s))
         return torch.tensor(scores, dtype=torch.float32)

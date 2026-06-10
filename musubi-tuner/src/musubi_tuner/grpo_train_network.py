@@ -307,8 +307,22 @@ def _grpo_loop(base_trainer, args, grpo_config, pre_args):
         start = (global_step * batch_size) % len(sample_parameters)
         batch_params = [sample_parameters[(start + i) % len(sample_parameters)] for i in range(batch_size)]
 
+        # Load reference images for delta_e00 reward (None if not specified in prompt file)
+        ref_imgs = []
+        for i in range(batch_size):
+            item = prompt_dataset[(start + i) % len(prompt_dataset)]
+            if item.reference_image_path:
+                try:
+                    from PIL import Image as _PIL_Image
+                    ref_imgs.append(_PIL_Image.open(item.reference_image_path).convert("RGB"))
+                except Exception:
+                    ref_imgs.append(None)
+            else:
+                ref_imgs.append(None)
+        reference_images = ref_imgs if any(r is not None for r in ref_imgs) else None
+
         with accelerator.accumulate(network_prepared):
-            loss, log_dict = grpo_trainer.step(batch_params)
+            loss, log_dict = grpo_trainer.step(batch_params, reference_images=reference_images)
 
             accelerator.backward(loss)
 
