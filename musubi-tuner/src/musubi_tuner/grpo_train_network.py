@@ -258,6 +258,16 @@ def _grpo_loop(base_trainer, args, grpo_config, pre_args):
 
     sample_parameters = base_trainer.process_sample_prompts(args, accelerator, pre_args.prompt_file)
 
+    # Move all pre-encoded embeddings to CPU to free GPU memory for training.
+    # With many prompts (e.g. 500), the VL embeds (which include image tokens) can
+    # occupy 30+ GB on GPU. _build_batch_dict moves them back to device per-step.
+    for sp in sample_parameters:
+        for k, v in list(sp.items()):
+            if isinstance(v, torch.Tensor) and v.is_cuda:
+                sp[k] = v.cpu()
+            elif isinstance(v, list) and v and isinstance(v[0], torch.Tensor) and v[0].is_cuda:
+                sp[k] = [t.cpu() for t in v]
+
     # ── Prepare with accelerator ──────────────────────────────────────────────
     if blocks_to_swap > 0:
         transformer_prepared = accelerator.prepare(transformer, device_placement=[False])
