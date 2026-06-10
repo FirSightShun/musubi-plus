@@ -67,17 +67,22 @@ clip_max = 10.0
 ```
 
 ```bash
+# qwen_image 架构示例（注意文本编码器参数名为 --text_encoder）
 accelerate launch --mixed_precision bf16 \
     src/musubi_tuner/grpo_train_network.py \
     --grpo_config grpo_config.toml \
     --prompt_file prompts.jsonl \
     --dit path/to/dit \
     --vae path/to/vae \
-    --text_encoder1 path/to/text_encoder \
-    --network_module networks.lora \
-    --network_dim 32
+    --text_encoder path/to/text_encoder \
+    --network_module networks.lora_qwen_image \
+    --network_dim 32 \
+    --model_version edit-2511
+
+# HunyuanVideo / Wan 架构使用 --text_encoder1
 ```
 
+使用指南（参数说明 / Reward 配置 / 架构适配 / 常见问题）见 [doc/grpo_usage.md](doc/grpo_usage.md)。  
 设计文档见 [doc/grpo_method.md](doc/grpo_method.md)。调研覆盖：DanceGRPO、Flow-GRPO、Adv-GRPO、MO-GRPO、PREF-GRPO，详见 [doc/GRPO_MultiReward_AntiHacking_Report.html](doc/GRPO_MultiReward_AntiHacking_Report.html)。
 
 ---
