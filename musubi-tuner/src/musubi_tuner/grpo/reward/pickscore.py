@@ -37,6 +37,11 @@ class PickScoreReward(BaseReward):
         self._device = device
         self._loaded = True
 
+    def offload(self) -> None:
+        if self._model is not None:
+            self._model.to("cpu")
+            torch.cuda.empty_cache()
+
     def score(self, images: list[Image.Image], prompts: list[str], **kwargs: Any) -> torch.Tensor:
         device = getattr(self, "_device", torch.device("cpu"))
         self.load(device)

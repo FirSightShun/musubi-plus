@@ -133,6 +133,9 @@ class GRPOTrainer:
                 except Exception as e:
                     logger.warning(f"Reward '{name}' failed: {e}. Zeroing out.")
                     scores[name] = torch.zeros(len(all_images))
+                finally:
+                    # Offload reward model back to CPU to free GPU for Phase 2
+                    rw.offload()
 
             # ── MO-GRPO advantages ──────────────────────────────────────────
             weight_map = {name: w for name, _rw, w in self._named_rewards}

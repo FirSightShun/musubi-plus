@@ -54,6 +54,12 @@ class BaseReward(ABC):
     def load(self, device: torch.device) -> None:  # noqa: D401
         """Lazy-load any heavyweight model assets onto *device*."""
 
+    def offload(self) -> None:
+        """Move model assets back to CPU to free GPU memory between steps.
+
+        Override in subclasses that hold nn.Module instances. Default no-op.
+        """
+
     @abstractmethod
     def score(
         self,
