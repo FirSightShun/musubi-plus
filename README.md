@@ -23,7 +23,8 @@ musubi-plus:        loss = (loss * sample_weight).mean()
 使用方法：
 
 ```bash
-accelerate launch qwen_image_train_network.py \
+cd musubi-tuner
+accelerate launch src/musubi_tuner/qwen_image_train_network.py \
     --sample_weight_file sample_weights.json \
     --sample_weight_multiplier 1.0 \
     ...
@@ -78,9 +79,13 @@ accelerate launch --mixed_precision bf16 \
     --text_encoder path/to/text_encoder \
     --network_module networks.lora_qwen_image \
     --network_dim 32 \
-    --model_version edit-2511
+    --model_version edit-2511 \
+    --grpo_steps 1000 \
+    --output_dir output/grpo_run \
+    --output_name grpo_qwen
 
-# HunyuanVideo / Wan 架构使用 --text_encoder1
+# HunyuanVideo 需要两个编码器：--text_encoder1（LLaVA-LLaMA3）+ --text_encoder2（CLIP-L）
+# Wan 只需要 --text_encoder1（UMT5-XXL）
 ```
 
 使用指南（参数说明 / Reward 配置 / 架构适配 / 常见问题）见 [doc/grpo_usage.md](doc/grpo_usage.md)。  
@@ -105,10 +110,10 @@ accelerate launch --mixed_precision bf16 \
 
 ```bash
 cd musubi-tuner
-uv sync --extra cu128
+uv sync --extra cu128   # torch 2.7.1+cu128（推荐）
+# 其他 CUDA 版本：cu124（torch 2.5.1+）、cu130（torch 2.9.1+）
+# 不同 extra 之间不能混用
 ```
-
-> torch 必须 pin 到 2.7.1+cu128，避免 CUDNN 兼容性问题。
 
 ---
 
