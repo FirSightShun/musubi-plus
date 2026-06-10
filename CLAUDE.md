@@ -122,5 +122,8 @@ See `doc/grpo_method.md` for the full design document.
 ## Documentation
 
 - `doc/off_policy_sample_weight_method.md` — full design + code walkthrough for the sample-weight feature
+- `doc/grpo_method.md` — GRPO algorithm design document
+- `doc/grpo_usage.md` — GRPO usage guide (parameters, rewards, architectures, FAQ)
+- `doc/rl_survey.md` — RL survey: GRPO variants, open-source reward models, anti-hacking methods, image-edit RM training
 - `musubi-tuner/docs/` — upstream docs for dataset config, architecture-specific training guides, advanced options
 - `musubi-tuner/.ai/context/overview.md` — upstream developer context (installation, commands, architecture summary)

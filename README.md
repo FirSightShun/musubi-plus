@@ -84,7 +84,7 @@ accelerate launch --mixed_precision bf16 \
 ```
 
 使用指南（参数说明 / Reward 配置 / 架构适配 / 常见问题）见 [doc/grpo_usage.md](doc/grpo_usage.md)。  
-设计文档见 [doc/grpo_method.md](doc/grpo_method.md)。调研覆盖：DanceGRPO、Flow-GRPO、Adv-GRPO、MO-GRPO、PREF-GRPO，详见 [doc/GRPO_MultiReward_AntiHacking_Report.html](doc/GRPO_MultiReward_AntiHacking_Report.html)。
+设计文档见 [doc/grpo_method.md](doc/grpo_method.md)。调研覆盖：DanceGRPO、Flow-GRPO、Adv-GRPO、MO-GRPO、PREF-GRPO、编辑专用 Reward Model 训练方案，详见 [doc/rl_survey.md](doc/rl_survey.md)。
 
 ---
 
