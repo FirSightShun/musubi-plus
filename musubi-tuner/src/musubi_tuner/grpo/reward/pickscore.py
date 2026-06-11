@@ -29,6 +29,10 @@ class PickScoreReward(BaseReward):
 
     def load(self, device: torch.device) -> None:
         if self._loaded:
+            # Model already initialised but may be on CPU after offload() — move back.
+            if self._model is not None:
+                self._model.to(device)
+            self._device = device
             return
         from transformers import AutoModel, AutoProcessor
 

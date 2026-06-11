@@ -190,8 +190,10 @@ def _grpo_loop(base_trainer, args, grpo_config, pre_args):
     elif getattr(args, "fp16_base", False):
         dit_weight_dtype = torch.float16
 
+    # fp8_scaled means qwen_image handles fp8 internally and requires dit_weight_dtype=None
+    _load_dit_dtype = None if getattr(args, "fp8_scaled", False) else (dit_weight_dtype or dit_dtype)
     transformer = base_trainer.load_transformer(
-        accelerator, args, args.dit, attn_mode, getattr(args, "split_attn", False), "cpu", dit_weight_dtype or dit_dtype
+        accelerator, args, args.dit, attn_mode, getattr(args, "split_attn", False), "cpu", _load_dit_dtype
     )
     transformer.requires_grad_(False)
     transformer.eval()
@@ -205,7 +207,7 @@ def _grpo_loop(base_trainer, args, grpo_config, pre_args):
         )
         transformer.move_to_device_except_swap_blocks(device)
     else:
-        transformer.to(device, dtype=dit_weight_dtype or dit_dtype)
+        transformer.to(device, dtype=_load_dit_dtype)
 
     # ── LoRA network ─────────────────────────────────────────────────────────
     sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -279,6 +281,13 @@ def _grpo_loop(base_trainer, args, grpo_config, pre_args):
 
     if not getattr(args, "gradient_checkpointing", False):
         transformer_prepared.eval()
+    else:
+        unwrapped = accelerator.unwrap_model(transformer_prepared)
+        if hasattr(unwrapped, "enable_gradient_checkpointing"):
+            cpu_offload = getattr(args, "gradient_checkpointing_cpu_offload", False)
+            unwrapped.enable_gradient_checkpointing(cpu_offload)
+        if hasattr(network, "enable_gradient_checkpointing"):
+            network.enable_gradient_checkpointing()
 
     accelerator.unwrap_model(network_prepared).prepare_grad_etc(transformer_prepared)
 
@@ -313,9 +322,14 @@ def _grpo_loop(base_trainer, args, grpo_config, pre_args):
     os.makedirs(output_dir, exist_ok=True)
 
     # ── Training loop ──────────────────────────────────────────────────────
+    num_processes = accelerator.num_processes
+    process_index = accelerator.process_index
+
     for global_step in range(max_steps):
-        # Sample a batch of prompts (cycling through the dataset)
-        start = (global_step * batch_size) % len(sample_parameters)
+        # Each rank samples a DIFFERENT prompt so DDP gradient averaging
+        # accumulates signal from num_processes distinct prompts per step,
+        # giving effective batch_size = batch_size * num_processes.
+        start = (global_step * batch_size * num_processes + process_index * batch_size) % len(sample_parameters)
         batch_params = [sample_parameters[(start + i) % len(sample_parameters)] for i in range(batch_size)]
 
         # Load reference images for delta_e00 reward (None if not specified in prompt file)
