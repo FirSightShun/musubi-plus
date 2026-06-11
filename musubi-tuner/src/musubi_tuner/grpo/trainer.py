@@ -367,28 +367,35 @@ class GRPOTrainer:
 
         imgs_t = torch.stack(frames).to(device=device, dtype=self.vae.dtype)  # [B, 3, H, W]
 
+        # Encode in chunks to avoid OOM from large feat_cache in 3D conv when B is large.
+        vae_encode_chunk = 4
         with torch.no_grad():
-            if hasattr(self.vae, "latents_mean"):
-                # qwen_image VAE: encode_pixels_to_latents handles [-1,1] norm and mean/std scaling
-                # Input expected in [0, 1]; unsqueeze temporal dim handled internally
-                latents = self.vae.encode_pixels_to_latents(imgs_t)  # [B, C, 1, H, W]
-            else:
-                # diffusers-style VAE
-                imgs_t = imgs_t * 2.0 - 1.0          # [0,1] → [-1,1]
-                imgs_t = imgs_t.unsqueeze(2)           # [B, C, H, W] → [B, C, 1, H, W]
-                latent_dist = self.vae.encode(imgs_t)
-                if hasattr(latent_dist, "latent_dist"):
-                    latents = latent_dist.latent_dist.sample()
-                elif hasattr(latent_dist, "sample"):
-                    latents = latent_dist.sample()
+            latents_chunks: list[torch.Tensor] = []
+            for vae_start in range(0, len(images), vae_encode_chunk):
+                chunk_imgs = imgs_t[vae_start:vae_start + vae_encode_chunk]
+                if hasattr(self.vae, "latents_mean"):
+                    # qwen_image VAE: encode_pixels_to_latents handles [-1,1] norm and mean/std scaling
+                    # Input expected in [0, 1]; unsqueeze temporal dim handled internally
+                    chunk_lat = self.vae.encode_pixels_to_latents(chunk_imgs)  # [chunk, C, 1, H, W]
                 else:
-                    latents = latent_dist
+                    # diffusers-style VAE
+                    chunk_imgs = chunk_imgs * 2.0 - 1.0      # [0,1] → [-1,1]
+                    chunk_imgs = chunk_imgs.unsqueeze(2)       # [chunk, C, H, W] → [chunk, C, 1, H, W]
+                    latent_dist = self.vae.encode(chunk_imgs)
+                    if hasattr(latent_dist, "latent_dist"):
+                        chunk_lat = latent_dist.latent_dist.sample()
+                    elif hasattr(latent_dist, "sample"):
+                        chunk_lat = latent_dist.sample()
+                    else:
+                        chunk_lat = latent_dist
 
-                if hasattr(self.vae, "config"):
-                    if getattr(self.vae.config, "shift_factor", None):
-                        latents = (latents - self.vae.config.shift_factor) * self.vae.config.scaling_factor
-                    elif getattr(self.vae.config, "scaling_factor", None):
-                        latents = latents * self.vae.config.scaling_factor
+                    if hasattr(self.vae, "config"):
+                        if getattr(self.vae.config, "shift_factor", None):
+                            chunk_lat = (chunk_lat - self.vae.config.shift_factor) * self.vae.config.scaling_factor
+                        elif getattr(self.vae.config, "scaling_factor", None):
+                            chunk_lat = chunk_lat * self.vae.config.scaling_factor
+                latents_chunks.append(chunk_lat)
+            latents = torch.cat(latents_chunks, dim=0)
 
         self.vae.to("cpu")
         return latents.float()
