@@ -362,9 +362,21 @@ def _grpo_loop(base_trainer, args, grpo_config, pre_args):
 
         if accelerator.sync_gradients:
             progress_bar.update(1)
-            progress_bar.set_postfix(loss=f"{log_dict.get('loss/total', 0):.4f}")
+            progress_bar.set_postfix(
+                loss=f"{log_dict.get('loss/total', 0):.4f}",
+                de=f"{log_dict.get('reward/delta_e00', 0):.3f}",
+                ps=f"{log_dict.get('reward/pickscore', 0):.1f}",
+            )
 
             if accelerator.is_main_process:
+                r_de = log_dict.get("reward/delta_e00", float("nan"))
+                r_ps = log_dict.get("reward/pickscore", float("nan"))
+                adv_mean = log_dict.get("reward/advantage_mean", float("nan"))
+                accelerator.print(
+                    f"[step {global_step + 1:5d}] "
+                    f"loss={log_dict.get('loss/total', 0):+.4f}  "
+                    f"delta_e00={r_de:.4f}  pickscore={r_ps:.2f}  adv={adv_mean:+.4f}"
+                )
                 if len(accelerator.trackers) > 0:
                     accelerator.log(log_dict, step=global_step)
 
