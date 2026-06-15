@@ -30,8 +30,24 @@ class PromptDataset(Dataset):
 
         if path.suffix == ".jsonl":
             self.items = self._load_jsonl(path)
+        elif path.suffix == ".json":
+            self.items = self._load_json(path)
         else:
             self.items = self._load_txt(path)
+
+    @staticmethod
+    def _load_json(path: Path) -> list[PromptItem]:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, list):
+            raise ValueError(f"Expected a JSON array in {path}, got {type(data).__name__}")
+        items = []
+        for obj in data:
+            if isinstance(obj, str):
+                items.append(PromptItem(prompt=obj))
+            else:
+                items.append(PromptItem(prompt=obj["prompt"], reference_image_path=obj.get("reference")))
+        return items
 
     @staticmethod
     def _load_jsonl(path: Path) -> list[PromptItem]:

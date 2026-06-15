@@ -369,13 +369,17 @@ def _grpo_loop(base_trainer, args, grpo_config, pre_args):
             )
 
             if accelerator.is_main_process:
-                r_de = log_dict.get("reward/delta_e00", float("nan"))
-                r_ps = log_dict.get("reward/pickscore", float("nan"))
                 adv_mean = log_dict.get("reward/advantage_mean", float("nan"))
+                reward_keys = ["delta_e00", "pickscore", "hps_v2", "image_reward", "clip", "vlm"]
+                reward_str = "  ".join(
+                    f"{k}={log_dict[f'reward/{k}']:.4f}"
+                    for k in reward_keys
+                    if f"reward/{k}" in log_dict
+                )
                 accelerator.print(
                     f"[step {global_step + 1:5d}] "
                     f"loss={log_dict.get('loss/total', 0):+.4f}  "
-                    f"delta_e00={r_de:.4f}  pickscore={r_ps:.2f}  adv={adv_mean:+.4f}"
+                    f"{reward_str}  adv={adv_mean:+.4f}"
                 )
                 if len(accelerator.trackers) > 0:
                     accelerator.log(log_dict, step=global_step)
