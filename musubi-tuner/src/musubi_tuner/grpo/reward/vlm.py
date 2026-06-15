@@ -42,12 +42,25 @@ class VLMReward(BaseReward):
             return
         from transformers import AutoProcessor, Qwen2VLForConditionalGeneration
 
-        self._processor = AutoProcessor.from_pretrained(self._model_id)
-        self._model = (
-            Qwen2VLForConditionalGeneration.from_pretrained(self._model_id, torch_dtype=torch.float16)
-            .eval()
-            .to(device)
-        )
+        # Fall back to local cache if network is unavailable (common in air-gapped training envs).
+        try:
+            self._processor = AutoProcessor.from_pretrained(self._model_id)
+        except OSError:
+            self._processor = AutoProcessor.from_pretrained(self._model_id, local_files_only=True)
+        try:
+            self._model = (
+                Qwen2VLForConditionalGeneration.from_pretrained(self._model_id, torch_dtype=torch.float16)
+                .eval()
+                .to(device)
+            )
+        except OSError:
+            self._model = (
+                Qwen2VLForConditionalGeneration.from_pretrained(
+                    self._model_id, torch_dtype=torch.float16, local_files_only=True
+                )
+                .eval()
+                .to(device)
+            )
         self._device = device
         self._loaded = True
 
