@@ -41,6 +41,9 @@ class NFTConfig:
     old_policy_update_every: int = 1   # update old policy every N training steps
     old_policy_decay: float = 0.0      # EMA decay: 0 = full copy, 0.5 = half-life EMA
 
+    # Memory management
+    phase2_chunk_size: int = 0         # split Phase-2 DiT forward into chunks; 0 = all at once
+
     # Rewards
     rewards: list[RewardConfig] = field(default_factory=list)
 
@@ -67,5 +70,6 @@ class NFTConfig:
             adv_clip_max=float(nft.get("adv_clip_max", 5.0)),
             old_policy_update_every=int(nft.get("old_policy_update_every", 1)),
             old_policy_decay=float(nft.get("old_policy_decay", 0.0)),
+            phase2_chunk_size=int(nft.get("phase2_chunk_size", 0)),
             rewards=reward_list,
         )

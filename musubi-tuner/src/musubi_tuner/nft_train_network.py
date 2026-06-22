@@ -282,9 +282,6 @@ def _nft_loop(base_trainer, args, nft_config, pre_args):
         network_dtype=network_dtype,
     )
 
-    if nft_trainer.ref_transformer is not None:
-        nft_trainer.ref_transformer.to(device, dtype=dit_dtype)
-
     accelerator.print(f"Starting NFT training: {max_steps} steps, group_size={nft_config.group_size}")
     accelerator.print(f"Rewards: {[(n, w) for n, _r, w in nft_trainer._named_rewards]}")
 
@@ -316,7 +313,10 @@ def _nft_loop(base_trainer, args, nft_config, pre_args):
 
         with accelerator.accumulate(network_prepared):
             loss, log_dict = nft_trainer.step(batch_params, reference_images=reference_images)
-            accelerator.backward(loss)
+            # When phase2_chunk_size > 0, NFTTrainer calls backward() per chunk internally
+            # and returns a detached zero tensor. Skip the outer backward() in that case.
+            if loss.requires_grad:
+                accelerator.backward(loss)
 
             if accelerator.sync_gradients:
                 max_grad_norm = getattr(args, "max_grad_norm", 1.0) or 1.0

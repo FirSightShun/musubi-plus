@@ -6,6 +6,7 @@
 |---|---|---|
 | **Off-Policy Sample-Weight** | 离线评估样本难度，训练时直接加权 loss | ✅ 已完成 |
 | **GRPO** | 在线策略梯度，用多维 Reward 模型引导生成质量 | ✅ 已完成 |
+| **DiffusionNFT** | 前向扩散过程策略优化，隐式正/负样本对比，兼容任意采样器 | ✅ 已完成 |
 
 ---
 
@@ -94,16 +95,81 @@ accelerate launch --mixed_precision bf16 \
 
 ---
 
-## 两种方法的定位
+## Feature 3：DiffusionNFT ✅
 
-| 维度 | Off-Policy Sample-Weight | GRPO |
-|---|---|---|
-| 反馈时机 | 训练前离线评估 | 训练中在线采样 |
-| 实现复杂度 | 低（3 文件 8 处改动） | 高（需完整 RL 训练循环） |
-| 适用场景 | 有明确质量指标、追求轻量改造 | 追求生成质量上限、资源充足 |
-| 权重更新 | 静态（手动重跑评估脚本） | 动态（每步自动更新策略） |
+将 [DiffusionNFT](https://arxiv.org/abs/2509.16117)（NVIDIA，ICLR 2026 Oral）引入 musubi-tuner，实现基于前向扩散过程的在线 RL 微调。
 
-两者可**组合使用**：用 Off-Policy 权重做课程采样，再用 GRPO 做在线策略优化。
+**与 GRPO 的区别：**
+- GRPO 优化**反向去噪轨迹**，需要存储完整 rollout 轨迹
+- NFT 优化**前向加噪过程的速度场**，天然兼容任意黑盒采样器，无需修改推理流程
+
+**核心特性：**
+- **隐式正/负样本构造**：通过 `v_pos = β*v_θ + (1-β)*v_old`、`v_neg = (1+β)*v_old - β*v_θ` 在速度空间构造正负对比，无需显式配对
+- **Old Policy 权重交换**：旧策略以 CPU state dict 存储，临时交换到 GPU 执行前向，无需额外模型副本
+- **自适应权重 MSE**：每个样本的重建误差按自身误差幅度归一化，防止异常样本主导梯度
+- **Phase 2 分块 backward**：`phase2_chunk_size` 控制每批处理的图像数，每批立即调用 `backward()` 释放计算图，峰值显存与 chunk_size 线性相关而非 group_size
+- **与 GRPO 共享 Reward 生态**：6 种内置 Reward（delta_e00 / clip / pickscore / hps_v2 / image_reward / vlm）全部复用
+
+```toml
+# nft_config.toml
+[nft]
+architecture        = "qwen_image"
+group_size          = 16
+num_inference_steps = 20
+width               = 768
+height              = 768
+guidance_scale      = 1.0
+beta                = 1.0       # 正/负速度插值强度
+kl_coeff            = 0.0001    # KL 正则化（防策略漂移）
+adv_clip_max        = 5.0
+old_policy_update_every = 1
+old_policy_decay        = 0.0   # 0=每步完整复制旧策略
+phase2_chunk_size   = 4         # 显存不足时分块处理
+
+[[nft.reward]]
+name   = "delta_e00"
+weight = 0.7
+[nft.reward.params]
+clip_max = 15.0
+
+[[nft.reward]]
+name   = "clip"
+weight = 0.3
+```
+
+```bash
+accelerate launch --mixed_precision bf16 \
+    src/musubi_tuner/nft_train_network.py \
+    --nft_config    nft_config.toml \
+    --prompt_file   prompts.jsonl \
+    --dit           path/to/dit \
+    --vae           path/to/vae \
+    --text_encoder  path/to/text_encoder \
+    --network_module networks.lora_qwen_image \
+    --network_dim   64 \
+    --network_weights path/to/init_lora.safetensors \
+    --learning_rate 3e-5 \
+    --nft_steps     1000 \
+    --model_version edit-2511 \
+    --gradient_checkpointing \
+    --output_dir    output/nft_run
+```
+
+使用指南（所有参数 / 显存估算 / old_policy_decay 调参 / adv≈0 诊断）见 [doc/nft_usage.md](doc/nft_usage.md)。
+
+---
+
+## 三种方法的定位
+
+| 维度 | Off-Policy Sample-Weight | GRPO | DiffusionNFT |
+|---|---|---|---|
+| 反馈时机 | 训练前离线评估 | 训练中在线采样 | 训练中在线采样 |
+| 优化目标 | loss 加权 | 反向去噪轨迹 | 前向速度场 |
+| 实现复杂度 | 低（3 文件 8 处改动） | 高（完整 RL 训练循环） | 高（完整 RL 训练循环） |
+| 适用场景 | 有明确质量指标、追求轻量改造 | 追求生成质量上限、资源充足 | 兼容任意采样器、显存受限时更灵活 |
+| 权重更新 | 静态（手动重跑评估脚本） | 动态（每步自动更新策略） | 动态（每步自动更新策略） |
+
+三者可**组合使用**：用 Off-Policy 权重做课程采样，再用 GRPO 或 NFT 做在线策略优化。
 
 ---
 

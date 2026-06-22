@@ -12,7 +12,6 @@ Design:
 """
 from __future__ import annotations
 
-import copy
 import logging
 from typing import Any, Callable, Optional
 
@@ -84,14 +83,17 @@ class NFTTrainer:
             if p.requires_grad
         }
 
-        # Deepcopy the transformer (with initial LoRA weights) as a frozen reference
-        # for KL regularization — prevents training from drifting too far from the
-        # initial checkpoint.  Skipped when kl_coeff == 0 to save ~1 GB memory.
-        self.ref_transformer: Optional[torch.nn.Module] = None
+        # Save initial LoRA weights as a frozen reference for KL regularization.
+        # Uses the same weight-swap pattern as _with_old_policy to avoid deepcopy
+        # of the transformer (which fails when blocks_to_swap ModelOffloader is active).
+        # Skipped when kl_coeff == 0 to save memory.
+        self._ref_state: Optional[dict[str, torch.Tensor]] = None
         if config.kl_coeff > 0:
-            self.ref_transformer = copy.deepcopy(accelerator.unwrap_model(transformer))
-            self.ref_transformer.requires_grad_(False)
-            self.ref_transformer.eval()
+            self._ref_state = {
+                n: p.detach().cpu().clone()
+                for n, p in unwrapped_net.named_parameters()
+                if p.requires_grad
+            }
 
     # ------------------------------------------------------------------
     # Public API
@@ -173,21 +175,41 @@ class NFTTrainer:
     def _with_old_policy(self, fn: Callable[[], Any]) -> Any:
         """Temporarily swap LoRA weights to old_state, call fn(), then restore."""
         net = self.accelerator.unwrap_model(self.network)
-        # Backup current params (in-place, stays on device)
+        device = self.accelerator.device
+        # Backup current params, cloned to CPU to avoid holding GPU memory
         current: dict[str, torch.Tensor] = {
-            n: p.data.clone() for n, p in net.named_parameters() if p.requires_grad
+            n: p.data.clone().cpu() for n, p in net.named_parameters() if p.requires_grad
         }
-        # Load old params onto device
+        # Force all LoRA params to GPU with old weights.
+        # This prevents device mismatch when blocks_to_swap offloads some blocks to CPU:
+        # the block offloader moves base weights, but LoRA weights must be on GPU first.
         for n, p in net.named_parameters():
             if p.requires_grad:
-                p.data.copy_(self._old_state[n].to(p.device))
+                p.data = self._old_state[n].to(device)
         try:
             result = fn()
         finally:
-            # Always restore current params, even if fn() raises
             for n, p in net.named_parameters():
                 if p.requires_grad:
-                    p.data.copy_(current[n])
+                    p.data = current[n].to(device)
+        return result
+
+    def _with_ref_policy(self, fn: Callable[[], Any]) -> Any:
+        """Temporarily swap LoRA weights to _ref_state (initial checkpoint), call fn(), then restore."""
+        net = self.accelerator.unwrap_model(self.network)
+        device = self.accelerator.device
+        current: dict[str, torch.Tensor] = {
+            n: p.data.clone().cpu() for n, p in net.named_parameters() if p.requires_grad
+        }
+        for n, p in net.named_parameters():
+            if p.requires_grad:
+                p.data = self._ref_state[n].to(device)
+        try:
+            result = fn()
+        finally:
+            for n, p in net.named_parameters():
+                if p.requires_grad:
+                    p.data = current[n].to(device)
         return result
 
     def _update_old_policy(self) -> None:
@@ -255,19 +277,20 @@ class NFTTrainer:
         sample_parameters: list[dict],
         param_indices: list[int],
     ) -> tuple[torch.Tensor, dict[str, float]]:
-        """Compute the NFT loss.
+        """Compute the NFT loss, optionally in micro-batches (phase2_chunk_size).
 
         Steps:
         1. VAE-encode generated images → scaled latents x0.
         2. Sample t ~ U(0, 1) per sample.
         3. Construct noisy latents x_t = (1-t)*x0 + t*ε.
-        4. Three forward passes: v_old (no_grad, old LoRA), v_θ (with_grad, current LoRA),
-           v_ref (no_grad, frozen ref_transformer).
-        5. Implicit positive/negative velocity:
-               v_pos = β*v_θ + (1-β)*v_old
-               v_neg = (1+β)*v_old - β*v_θ
-        6. x0 reconstructions and adaptive-weight MSE loss.
-        7. Map advantages to r ∈ [0,1]; combined NFT + KL objective.
+        4. Three forward passes per chunk: v_old (no_grad, old LoRA), v_ref (no_grad, initial
+           LoRA), v_θ (with_grad, current LoRA).
+        5. Implicit positive/negative velocity; adaptive-weight MSE; advantage-weighted loss.
+        6. When chunked (phase2_chunk_size > 0): backward() is called immediately after each
+           chunk to free that chunk's graph before the next chunk is computed. Peak activation
+           memory scales with chunk_size rather than full group_size. Returns a detached zero
+           tensor so the outer accelerator.backward() in the training loop is a no-op.
+           When un-chunked (phase2_chunk_size == 0): accumulate loss and return tensor as usual.
         """
         device = self.accelerator.device
         bsz = len(images)
@@ -285,75 +308,133 @@ class NFTTrainer:
         t_view = t.view(bsz, *([1] * (latents.ndim - 1)))          # [B, 1, ...]
         noisy = (1.0 - t_view) * latents + t_view * noise           # x_t
 
-        batch_for_dit = self._build_batch_dict(sample_parameters, param_indices, bsz, device, latents=latents)
+        # ── 4–7. (Chunked) forward passes ────────────────────────────────────
+        chunk = cfg.phase2_chunk_size if cfg.phase2_chunk_size > 0 else bsz
+        chunked_backward = cfg.phase2_chunk_size > 0
 
-        # ── 4a. v_old — old policy, no grad ─────────────────────────────────
-        def _call_old():
-            tr = self.accelerator.unwrap_model(self.transformer)
-            tr.eval()
-            out, _ = self.base.call_dit(
-                self.args, self.accelerator, tr,
-                latents, batch_for_dit, noise, noisy, t, self.network_dtype,
-            )
-            return out.detach().to(torch.float32)
-
-        with torch.no_grad():
-            v_old = self._with_old_policy(_call_old)                # [B, C, F, H, W], fp32
-
-        # ── 4b. v_θ — current policy, with grad ────────────────────────────
-        v_theta, _ = self.base.call_dit(
-            self.args, self.accelerator, self.transformer,
-            latents, batch_for_dit, noise, noisy, t, self.network_dtype,
-        )
-        v_theta = v_theta.to(torch.float32)                          # [B, C, F, H, W]
-
-        # ── 4c. v_ref — frozen reference, no grad ───────────────────────────
-        v_ref = None
-        if self.ref_transformer is not None:
-            with torch.no_grad():
-                v_ref, _ = self.base.call_dit(
-                    self.args, self.accelerator, self.ref_transformer,
-                    latents, batch_for_dit, noise, noisy, t, self.network_dtype,
-                )
-            v_ref = v_ref.detach().to(torch.float32)
-
-        # ── 5. Implicit positive and negative velocity ──────────────────────
         beta = cfg.beta
-        v_pos = beta * v_theta + (1.0 - beta) * v_old
-        v_neg = (1.0 + beta) * v_old - beta * v_theta               # reflected across v_old
 
-        # ── 6. x0 reconstructions (flow-matching: x0 = x_t - t * v) ────────
-        latents_f32 = latents.to(torch.float32)
-        noisy_f32 = noisy.to(torch.float32)
+        # Accumulators: float for the chunked path (graph freed per chunk),
+        # tensor for the non-chunked path (single backward at the end).
+        nft_log = 0.0
+        kl_log = 0.0
+        nft_sum = torch.tensor(0.0, device=device)
+        kl_num = torch.tensor(0.0, device=device)
+        kl_denom = 0
 
-        x0_pos = noisy_f32 - t_view * v_pos                         # [B, C, F, H, W]
-        x0_neg = noisy_f32 - t_view * v_neg
+        for cs in range(0, bsz, chunk):
+            ce = min(cs + chunk, bsz)
+            c = ce - cs
+            sl = slice(cs, ce)
 
-        spatial_dims = list(range(1, latents_f32.ndim))
+            lat_c = latents[sl]
+            noisy_c = noisy[sl]
+            noise_c = noise[sl]
+            t_c = t[sl]
+            t_view_c = t_view[sl]
+            adv_c = advantages[sl]
+            pidx_c = param_indices[cs:ce]
 
-        # Adaptive per-sample normalization (prevents large-error samples from dominating)
-        w_pos = (x0_pos - latents_f32).abs().mean(dim=spatial_dims, keepdim=True).detach().clamp(min=1e-5)
-        w_neg = (x0_neg - latents_f32).abs().mean(dim=spatial_dims, keepdim=True).detach().clamp(min=1e-5)
+            batch_c = self._build_batch_dict(sample_parameters, pidx_c, c, device, latents=lat_c)
 
-        pos_loss = ((x0_pos - latents_f32) ** 2 / w_pos).mean(dim=spatial_dims)  # [B]
-        neg_loss = ((x0_neg - latents_f32) ** 2 / w_neg).mean(dim=spatial_dims)  # [B]
+            # 4a. v_old — old policy, no grad
+            def _call_old(lat=lat_c, bat=batch_c, noi=noise_c, noisy=noisy_c, tc=t_c):
+                tr = self.accelerator.unwrap_model(self.transformer)
+                tr.eval()
+                out, _ = self.base.call_dit(
+                    self.args, self.accelerator, tr,
+                    lat, bat, noi, noisy, tc, self.network_dtype,
+                )
+                return out.detach().to(torch.float32)
 
-        # ── 7. Advantage → r ∈ [0, 1], combined objective ───────────────────
-        adv_clipped = advantages.clamp(-cfg.adv_clip_max, cfg.adv_clip_max)
-        r = adv_clipped / cfg.adv_clip_max / 2.0 + 0.5              # [B], in [0, 1]
+            with torch.no_grad():
+                v_old_c = self._with_old_policy(_call_old)
 
-        nft_loss = (r * pos_loss + (1.0 - r) * neg_loss).mean() / beta
+            # 4b. v_ref — initial LoRA policy, no grad (before v_θ to free memory first)
+            v_ref_c = None
+            if self._ref_state is not None:
+                def _call_ref(lat=lat_c, bat=batch_c, noi=noise_c, noisy=noisy_c, tc=t_c):
+                    tr = self.accelerator.unwrap_model(self.transformer)
+                    tr.eval()
+                    out, _ = self.base.call_dit(
+                        self.args, self.accelerator, tr,
+                        lat, bat, noi, noisy, tc, self.network_dtype,
+                    )
+                    return out.detach().to(torch.float32)
 
-        # KL regularization
+                with torch.no_grad():
+                    v_ref_c = self._with_ref_policy(_call_ref)
+
+            torch.cuda.empty_cache()
+
+            # 4c. v_θ — current policy, with grad
+            v_theta_c, _ = self.base.call_dit(
+                self.args, self.accelerator, self.transformer,
+                lat_c, batch_c, noise_c, noisy_c, t_c, self.network_dtype,
+            )
+            v_theta_c = v_theta_c.to(torch.float32)
+
+            # 5. Implicit positive and negative velocity
+            v_pos_c = beta * v_theta_c + (1.0 - beta) * v_old_c
+            v_neg_c = (1.0 + beta) * v_old_c - beta * v_theta_c
+
+            # 6. x0 reconstructions (flow-matching: x0 = x_t - t * v)
+            lat_f32_c = lat_c.to(torch.float32)
+            noisy_f32_c = noisy_c.to(torch.float32)
+
+            x0_pos_c = noisy_f32_c - t_view_c * v_pos_c
+            x0_neg_c = noisy_f32_c - t_view_c * v_neg_c
+
+            spatial_dims = list(range(1, lat_f32_c.ndim))
+            w_pos_c = (x0_pos_c - lat_f32_c).abs().mean(dim=spatial_dims, keepdim=True).detach().clamp(min=1e-5)
+            w_neg_c = (x0_neg_c - lat_f32_c).abs().mean(dim=spatial_dims, keepdim=True).detach().clamp(min=1e-5)
+
+            pos_loss_c = ((x0_pos_c - lat_f32_c) ** 2 / w_pos_c).mean(dim=spatial_dims)  # [c]
+            neg_loss_c = ((x0_neg_c - lat_f32_c) ** 2 / w_neg_c).mean(dim=spatial_dims)  # [c]
+
+            # 7. Advantage → r ∈ [0, 1]
+            adv_clipped_c = adv_c.clamp(-cfg.adv_clip_max, cfg.adv_clip_max)
+            r_c = adv_clipped_c / cfg.adv_clip_max / 2.0 + 0.5
+
+            if chunked_backward:
+                # Scale by c/bsz so summing chunks = original mean-over-B
+                nft_c = (r_c * pos_loss_c + (1.0 - r_c) * neg_loss_c).sum() / beta / bsz
+                kl_c = torch.zeros([], device=device)
+                if v_ref_c is not None:
+                    kl_c = ((v_theta_c - v_ref_c) ** 2).mean() * cfg.kl_coeff * c / bsz
+
+                chunk_total = nft_c + kl_c
+                nft_log += nft_c.detach().item()
+                kl_log += kl_c.detach().item()
+
+                # Backward immediately — frees this chunk's computation graph
+                self.accelerator.backward(chunk_total)
+                del v_theta_c, v_pos_c, v_neg_c, x0_pos_c, x0_neg_c, nft_c, kl_c, chunk_total
+                torch.cuda.empty_cache()
+            else:
+                nft_sum = nft_sum + (r_c * pos_loss_c + (1.0 - r_c) * neg_loss_c).sum() / beta
+                if v_ref_c is not None:
+                    kl_num = kl_num + ((v_theta_c - v_ref_c) ** 2).sum()
+                    kl_denom += v_theta_c.numel()
+
+        if chunked_backward:
+            # Gradients already in .grad buffers. Return detached zero so the
+            # outer accelerator.backward() in the training loop is a no-op.
+            log["loss/nft"] = nft_log
+            log["loss/kl"] = kl_log
+            log["loss/total"] = nft_log + kl_log
+            return torch.zeros([], device=device), log
+
+        # Non-chunked path: return loss tensor for the outer backward()
+        nft_loss = nft_sum / bsz
         kl_loss = torch.tensor(0.0, device=device)
-        if v_ref is not None:
-            kl_loss = ((v_theta - v_ref) ** 2).mean() * cfg.kl_coeff
+        if kl_denom > 0:
+            kl_loss = (kl_num / kl_denom) * cfg.kl_coeff
 
         total_loss = nft_loss + kl_loss
         log["loss/nft"] = nft_loss.item()
         log["loss/kl"] = kl_loss.item()
         log["loss/total"] = total_loss.item()
-
         return total_loss, log
 
     # ------------------------------------------------------------------
