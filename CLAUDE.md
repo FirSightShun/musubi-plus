@@ -4,10 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Purpose
 
-musubi-plus extends [musubi-tuner](https://github.com/kohya-ss/musubi-tuner) with RL-based training improvements for image/video generation models. Two features are being built:
+musubi-plus extends [musubi-tuner](https://github.com/kohya-ss/musubi-tuner) with RL-based training improvements for image/video generation models. Three features are implemented:
 
 1. **Off-Policy Sample-Weight** (complete) — offline per-sample weighted loss via `sample_weights.json`
 2. **GRPO** (complete) — online policy gradient RL training loop
+3. **DiffusionNFT** (complete) — forward-process RL fine-tuning (NVIDIA, ICLR 2026 Oral)
 
 All actual training code lives in `musubi-tuner/`. The repo root holds docs and this framework layer.
 
@@ -119,11 +120,41 @@ Key design choices:
 
 See `doc/grpo_method.md` for the full design document.
 
+### NFT Module (`nft/`)
+
+Implemented as an independent module under `musubi-tuner/src/musubi_tuner/nft/`. Does **not** modify any existing files.
+
+```
+nft/
+├── __init__.py
+├── config.py     # NFTConfig dataclass + from_toml()
+└── trainer.py    # NFTTrainer (composes NetworkTrainer, runs NFT loop)
+```
+
+Entry script: `nft_train_network.py`.
+
+Key design choices:
+- `NFTTrainer` **composes** (holds) a `NetworkTrainer` instance; never inherits.
+- **Old policy as CPU state dict**: LoRA weights stored as `{name: tensor}` on CPU, temporarily swapped to GPU via `p.data = state[n].to(device)` for no_grad forward passes, then restored. No PEFT needed, no extra model copy. Same pattern used for `_ref_state` (initial LoRA snapshot for KL).
+- **Three forward passes per step**: `v_old` (old LoRA, no_grad), `v_ref` (initial LoRA, no_grad, only when `kl_coeff > 0`), `v_θ` (current LoRA, with_grad).
+- **eval mode must be restored**: `_call_old`/`_call_ref` closures call `tr.eval()` inside a `try/finally` to restore `tr.training`. Without this, the subsequent `v_θ` forward runs in eval mode, silently disabling `gradient_checkpointing`.
+- **`phase2_chunk_size`**: call `accelerator.backward(chunk_loss)` **immediately inside the chunk loop**, then return `torch.zeros([], requires_grad=False)`. The outer `backward()` in `nft_train_network.py` is guarded with `if loss.requires_grad:`. Simply accumulating loss across chunks and calling backward once does NOT save memory — all chunk graphs are held simultaneously.
+- **`old_policy_decay`**: EMA decay for old policy tracking. `decay=0.0` (default) = full copy each step (PPO-style). `decay=0.5` gives half-life ~1.4 steps → old ≈ current → adv ≈ 0 → RL signal disappears. Use `decay=0.9` (half-life ~9 steps) as minimum to get non-zero advantage. Start with `decay=0.0` to verify training is healthy.
+- **`blocks_to_swap` is incompatible** with the weight-swap pattern. Do not use `--blocks_to_swap` with NFT training.
+
+Known pitfalls from NFT runs:
+- `adv ≈ 0` throughout: almost always caused by `old_policy_decay` being too large (≥ 0.5). Check `advantage_std` in logs; should be > 0.
+- OOM in Phase 2: set `phase2_chunk_size` (e.g. 8 for `group_size=32` at 768×768 on H100 80G). Each image ~2 GiB gradient activation at 768×768 with gradient_checkpointing.
+- `kl ≈ 0` throughout: normal early in training; LoRA weights haven't diverged yet from `_ref_state`.
+
+See `doc/nft_usage.md` for full parameter reference.
+
 ## Documentation
 
 - `doc/off_policy_sample_weight_method.md` — full design + code walkthrough for the sample-weight feature
 - `doc/grpo_method.md` — GRPO algorithm design document
 - `doc/grpo_usage.md` — GRPO usage guide (parameters, rewards, architectures, FAQ)
+- `doc/nft_usage.md` — NFT usage guide (all parameters, memory sizing, old_policy_decay tuning, adv≈0 diagnosis)
 - `doc/rl_survey.md` — RL survey: GRPO variants, open-source reward models, anti-hacking methods, image-edit RM training
 - `musubi-tuner/docs/` — upstream docs for dataset config, architecture-specific training guides, advanced options
 - `musubi-tuner/.ai/context/overview.md` — upstream developer context (installation, commands, architecture summary)
