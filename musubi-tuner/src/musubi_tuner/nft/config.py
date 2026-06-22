@@ -21,7 +21,7 @@ class NFTConfig:
     """
 
     # Architecture
-    architecture: str = "qwen_image"
+    architecture: str = "hv"
 
     # Sampling
     group_size: int = 16           # samples per prompt for advantage estimation
@@ -47,6 +47,12 @@ class NFTConfig:
     # Rewards
     rewards: list[RewardConfig] = field(default_factory=list)
 
+    def __post_init__(self) -> None:
+        if self.beta <= 0:
+            raise ValueError(f"NFTConfig.beta must be > 0, got {self.beta}")
+        if self.adv_clip_max <= 0:
+            raise ValueError(f"NFTConfig.adv_clip_max must be > 0, got {self.adv_clip_max}")
+
     @classmethod
     def from_toml(cls, path: str | Path) -> "NFTConfig":
         with open(path, "rb") as f:
@@ -57,7 +63,7 @@ class NFTConfig:
         reward_list = [RewardConfig.from_dict(r) for r in nft.get("reward", [])]
 
         return cls(
-            architecture=str(nft.get("architecture", "qwen_image")),
+            architecture=str(nft.get("architecture", "hv")),
             group_size=int(nft.get("group_size", 16)),
             num_inference_steps=int(nft.get("num_inference_steps", 10)),
             width=int(nft.get("width", 512)),

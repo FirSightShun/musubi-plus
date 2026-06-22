@@ -336,11 +336,10 @@ def _nft_loop(base_trainer, args, nft_config, pre_args):
 
             if accelerator.is_main_process:
                 adv_mean = log_dict.get("reward/advantage_mean", float("nan"))
-                reward_keys = ["delta_e00", "pickscore", "hps_v2", "image_reward", "clip", "vlm"]
                 reward_str = "  ".join(
-                    f"{k}={log_dict[f'reward/{k}']:.4f}"
-                    for k in reward_keys
-                    if f"reward/{k}" in log_dict
+                    f"{name}={log_dict[f'reward/{name}']:.4f}"
+                    for name, _rw, _w in nft_trainer._named_rewards
+                    if f"reward/{name}" in log_dict
                 )
                 accelerator.print(
                     f"[step {global_step + 1:5d}] "

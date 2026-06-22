@@ -340,11 +340,15 @@ class NFTTrainer:
             # 4a. v_old — old policy, no grad
             def _call_old(lat=lat_c, bat=batch_c, noi=noise_c, noisy=noisy_c, tc=t_c):
                 tr = self.accelerator.unwrap_model(self.transformer)
+                was_training = tr.training
                 tr.eval()
-                out, _ = self.base.call_dit(
-                    self.args, self.accelerator, tr,
-                    lat, bat, noi, noisy, tc, self.network_dtype,
-                )
+                try:
+                    out, _ = self.base.call_dit(
+                        self.args, self.accelerator, tr,
+                        lat, bat, noi, noisy, tc, self.network_dtype,
+                    )
+                finally:
+                    tr.train(was_training)
                 return out.detach().to(torch.float32)
 
             with torch.no_grad():
@@ -355,19 +359,24 @@ class NFTTrainer:
             if self._ref_state is not None:
                 def _call_ref(lat=lat_c, bat=batch_c, noi=noise_c, noisy=noisy_c, tc=t_c):
                     tr = self.accelerator.unwrap_model(self.transformer)
+                    was_training = tr.training
                     tr.eval()
-                    out, _ = self.base.call_dit(
-                        self.args, self.accelerator, tr,
-                        lat, bat, noi, noisy, tc, self.network_dtype,
-                    )
+                    try:
+                        out, _ = self.base.call_dit(
+                            self.args, self.accelerator, tr,
+                            lat, bat, noi, noisy, tc, self.network_dtype,
+                        )
+                    finally:
+                        tr.train(was_training)
                     return out.detach().to(torch.float32)
 
                 with torch.no_grad():
                     v_ref_c = self._with_ref_policy(_call_ref)
 
+            # Free no_grad intermediates before the gradient-tracked forward pass
             torch.cuda.empty_cache()
 
-            # 4c. v_θ — current policy, with grad
+            # 4c. v_θ — current policy, with grad (transformer must be in training mode)
             v_theta_c, _ = self.base.call_dit(
                 self.args, self.accelerator, self.transformer,
                 lat_c, batch_c, noise_c, noisy_c, t_c, self.network_dtype,
